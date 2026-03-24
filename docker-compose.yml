@@ -1,0 +1,33 @@
+services:
+  linear-automation:
+    build: .
+    container_name: linear-automation
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # GitHub token for gh CLI (create at: github.com/settings/tokens)
+      - GH_TOKEN=${GH_TOKEN}
+      # Claude Code OAuth token (from `claude setup-token` — valid 1 year)
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      # Override for server paths
+      - REPOS_DIR=/app/repos
+      - LOGS_DIR=/app/logs
+      - REPO_MAP={}
+    volumes:
+      # Persist cloned repos across container restarts
+      - repos-data:/app/repos
+      # Persist logs
+      - logs-data:/app/logs
+      # Mount SSH key for git clone (optional — use if repos are private)
+      - ${SSH_KEY_PATH:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      # Persist Claude Code credentials
+      - claude-data:/root/.claude
+      # Persist gh CLI credentials
+      - gh-data:/root/.config/gh
+
+volumes:
+  repos-data:
+  logs-data:
+  claude-data:
+  gh-data:
