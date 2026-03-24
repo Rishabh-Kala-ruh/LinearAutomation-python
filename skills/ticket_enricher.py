@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -177,24 +178,40 @@ class LinearEnricher:
             updated_at=issue.get("updatedAt", ""),
         )
 
+        # Fire all 7 API calls in parallel (like Promise.allSettled in TS version)
+        results: dict[str, Any] = {}
+
+        def _fetch(key: str, fn: Any, *args: Any) -> tuple[str, Any]:
+            try:
+                return (key, fn(*args))
+            except Exception:
+                return (key, None)
+
+        with ThreadPoolExecutor(max_workers=7) as pool:
+            futures = [
+                pool.submit(_fetch, "state", self.client.get_issue_state, issue_id),
+                pool.submit(_fetch, "labels", self.client.get_issue_labels, issue_id),
+                pool.submit(_fetch, "comments", self.client.get_issue_comments, issue_id, 50),
+                pool.submit(_fetch, "children", self.client.get_issue_children, issue_id, 20),
+                pool.submit(_fetch, "parent", self.client.get_issue_parent, issue_id),
+                pool.submit(_fetch, "relations", self.client.get_issue_relations, issue_id, 20),
+                pool.submit(_fetch, "attachments", self.client.get_issue_attachments, issue_id, 10),
+            ]
+            for future in as_completed(futures):
+                key, value = future.result()
+                results[key] = value
+
         # State
-        try:
-            state = self.client.get_issue_state(issue_id)
-            if state:
-                context.status = state.get("name")
-        except Exception:
-            pass
+        if results.get("state"):
+            context.status = results["state"].get("name")
 
         # Labels
-        try:
-            context.labels = self.client.get_issue_labels(issue_id)
-        except Exception:
-            pass
+        if results.get("labels"):
+            context.labels = results["labels"]
 
         # Comments
-        try:
-            raw_comments = self.client.get_issue_comments(issue_id, first=50)
-            raw_comments.sort(key=lambda c: c.get("createdAt", ""))
+        if results.get("comments"):
+            raw_comments = sorted(results["comments"], key=lambda c: c.get("createdAt", ""))
             context.comments = [
                 EnrichedComment(
                     body=c.get("body", ""),
@@ -203,12 +220,9 @@ class LinearEnricher:
                 )
                 for c in raw_comments
             ]
-        except Exception:
-            pass
 
         # Children / sub-issues
-        try:
-            children = self.client.get_issue_children(issue_id, first=20)
+        if results.get("children"):
             context.sub_issues = [
                 SubIssue(
                     id=c["identifier"],
@@ -216,26 +230,20 @@ class LinearEnricher:
                     status=(c.get("state") or {}).get("name", "unknown"),
                     description=c.get("description") or "",
                 )
-                for c in children
+                for c in results["children"]
             ]
-        except Exception:
-            pass
 
         # Parent
-        try:
-            parent = self.client.get_issue_parent(issue_id)
-            if parent:
-                context.parent_context = ParentContext(
-                    id=parent["identifier"],
-                    title=parent["title"],
-                    description=parent.get("description") or "",
-                )
-        except Exception:
-            pass
+        if results.get("parent"):
+            parent = results["parent"]
+            context.parent_context = ParentContext(
+                id=parent["identifier"],
+                title=parent["title"],
+                description=parent.get("description") or "",
+            )
 
         # Relations
-        try:
-            relations = self.client.get_issue_relations(issue_id, first=20)
+        if results.get("relations"):
             context.relations = [
                 IssueRelationInfo(
                     type=r.get("type", ""),
@@ -243,23 +251,18 @@ class LinearEnricher:
                     title=(r.get("relatedIssue") or {}).get("title"),
                     description=((r.get("relatedIssue") or {}).get("description") or "")[:200],
                 )
-                for r in relations
+                for r in results["relations"]
             ]
-        except Exception:
-            pass
 
         # Attachments
-        try:
-            attachments = self.client.get_issue_attachments(issue_id, first=10)
+        if results.get("attachments"):
             context.attachments = [
                 AttachmentInfo(
                     title=a.get("title") or a.get("url", ""),
                     url=a.get("url", ""),
                 )
-                for a in attachments
+                for a in results["attachments"]
             ]
-        except Exception:
-            pass
 
         context.acceptance_criteria = parse_acceptance_criteria(context.description)
         context.file_hints = extract_file_hints(context.description, context.comments)

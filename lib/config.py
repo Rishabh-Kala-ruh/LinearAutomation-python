@@ -26,5 +26,7 @@ except json.JSONDecodeError:
     print("ERROR: REPO_MAP in .env is not valid JSON")
     sys.exit(1)
 
+MAX_CONCURRENT_TICKETS: int = int(os.getenv("MAX_CONCURRENT_TICKETS", "2"))
+
 PROCESSING_LABEL = "claude-processing"
 DONE_LABEL = "claude-done"
