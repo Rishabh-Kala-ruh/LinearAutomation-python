@@ -18,6 +18,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Install Claude Code CLI globally
 RUN npm i -g @anthropic-ai/claude-code
 
+# Disable Python output buffering for Docker logs
+ENV PYTHONUNBUFFERED=1
+
 # Set working directory
 WORKDIR /app
 
