@@ -43,7 +43,7 @@ class LinearClient:
 
     def get_issues(self, team_id: str, assignee_id: str, first: int = 20) -> list[dict[str, Any]]:
         query = """
-        query($teamId: String!, $assigneeId: String!, $first: Int!) {
+        query($teamId: ID!, $assigneeId: ID!, $first: Int!) {
           issues(
             filter: {
               team: { id: { eq: $teamId } }
@@ -72,7 +72,7 @@ class LinearClient:
 
     def get_issue_labels(self, issue_id: str) -> list[str]:
         query = """
-        query($id: String!) {
+        query($id: ID!) {
           issue(id: $id) { labels { nodes { name } } }
         }
         """
@@ -83,7 +83,7 @@ class LinearClient:
 
     def get_issue_project_name(self, issue_id: str) -> str | None:
         query = """
-        query($id: String!) {
+        query($id: ID!) {
           issue(id: $id) { project { name } }
         }
         """
@@ -95,7 +95,7 @@ class LinearClient:
 
     def get_team_states(self, team_id: str) -> list[dict[str, Any]]:
         query = """
-        query($id: String!) {
+        query($id: ID!) {
           team(id: $id) { states { nodes { id name type } } }
         }
         """
@@ -104,7 +104,7 @@ class LinearClient:
 
     def get_issue_team_id(self, issue_id: str) -> str | None:
         query = """
-        query($id: String!) {
+        query($id: ID!) {
           issue(id: $id) { team { id } }
         }
         """
@@ -114,7 +114,7 @@ class LinearClient:
 
     def update_issue(self, issue_id: str, state_id: str) -> None:
         mutation = """
-        mutation($id: String!, $stateId: String!) {
+        mutation($id: ID!, $stateId: String!) {
           issueUpdate(id: $id, input: { stateId: $stateId }) { success }
         }
         """
@@ -124,7 +124,7 @@ class LinearClient:
 
     def get_issue_comments(self, issue_id: str, first: int = 50) -> list[dict[str, Any]]:
         query = """
-        query($id: String!, $first: Int!) {
+        query($id: ID!, $first: Int!) {
           issue(id: $id) {
             comments(first: $first) {
               nodes {
@@ -151,7 +151,7 @@ class LinearClient:
 
     def get_issue_children(self, issue_id: str, first: int = 20) -> list[dict[str, Any]]:
         query = """
-        query($id: String!, $first: Int!) {
+        query($id: ID!, $first: Int!) {
           issue(id: $id) {
             children(first: $first) {
               nodes {
@@ -171,7 +171,7 @@ class LinearClient:
 
     def get_issue_parent(self, issue_id: str) -> dict[str, Any] | None:
         query = """
-        query($id: String!) {
+        query($id: ID!) {
           issue(id: $id) {
             parent {
               identifier
@@ -188,7 +188,7 @@ class LinearClient:
 
     def get_issue_relations(self, issue_id: str, first: int = 20) -> list[dict[str, Any]]:
         query = """
-        query($id: String!, $first: Int!) {
+        query($id: ID!, $first: Int!) {
           issue(id: $id) {
             relations(first: $first) {
               nodes {
@@ -210,7 +210,7 @@ class LinearClient:
 
     def get_issue_attachments(self, issue_id: str, first: int = 10) -> list[dict[str, Any]]:
         query = """
-        query($id: String!, $first: Int!) {
+        query($id: ID!, $first: Int!) {
           issue(id: $id) {
             attachments(first: $first) {
               nodes {
@@ -228,7 +228,7 @@ class LinearClient:
 
     def get_issue_state(self, issue_id: str) -> dict[str, Any] | None:
         query = """
-        query($id: String!) {
+        query($id: ID!) {
           issue(id: $id) { state { name type } }
         }
         """
