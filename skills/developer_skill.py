@@ -5,19 +5,24 @@ Sits between ticket fetching and Claude Code execution.
 Handles scope resolution, repo inheritance, and smart prompt building
 for all cases: normal tickets, parent tickets with sub-tasks, and sub-tasks.
 
+Two-phase TDD flow:
+  Phase 1: Sentinel Guardian generates tests (test_prompt)
+  Phase 2: Developer implements the fix until tests pass (impl_prompt)
+
 Usage:
     from skills.developer_skill import DeveloperSkill
 
     skill = DeveloperSkill(linear_api_key, viewer_id)
-    result = skill.process(issue, team_key)
-    # result.repos       — resolved repo entries
-    # result.prompt      — scope-aware prompt for Claude
-    # result.identifier  — ticket identifier
-    # result.scope_type  — "normal" | "parent_with_subtasks" | "subtask"
+    result = skill.process(issue, team_key, worktree_path, repo_name)
+    # result.test_prompt  — Phase 1: Sentinel test generation prompt (None if Sentinel unavailable)
+    # result.impl_prompt  — Phase 2: implementation prompt (with TDD rules)
+    # result.repos        — resolved repo entries
+    # result.scope_type   — "normal" | "parent_with_subtasks" | "subtask"
 """
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +33,7 @@ from skills.ticket_enricher import (
     parse_acceptance_criteria, extract_file_hints,
     PRIORITY_MAP,
 )
+from skills.sentinel_integration import SentinelTestGenerator
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -53,7 +59,8 @@ class DeveloperResult:
     title: str
     scope_type: str  # "normal" | "parent_with_subtasks" | "subtask"
     repos: list[RepoEntry]
-    prompt: str
+    test_prompt: str | None  # Phase 1: Sentinel test generation (None if unavailable)
+    impl_prompt: str         # Phase 2: implementation (always present)
     enriched_context: EnrichedContext
 
 
@@ -67,19 +74,27 @@ class RepoEntry:
 
 
 class DeveloperSkill:
-    def __init__(self, api_key: str, viewer_id: str, github_org: str = "ruh-ai") -> None:
+    def __init__(
+        self, api_key: str, viewer_id: str,
+        github_org: str = "ruh-ai",
+        sentinel_skills_path: str | None = None,
+    ) -> None:
         self.client = LinearClient(api_key)
         self.enricher = LinearEnricher(api_key)
         self.viewer_id = viewer_id
         self.github_org = github_org
+        self.sentinel: SentinelTestGenerator | None = None
+
+        if sentinel_skills_path and os.path.isdir(sentinel_skills_path):
+            self.sentinel = SentinelTestGenerator(sentinel_skills_path)
 
     def process(
         self, issue: dict[str, Any], team_key: str, worktree_path: str, repo_name: str
     ) -> DeveloperResult:
         """
-        Main entry point. Resolves scope, repos, and builds the prompt.
-
-        Returns a DeveloperResult with everything needed to run Claude Code.
+        Main entry point. Resolves scope, repos, and builds two prompts:
+          - test_prompt: Phase 1 — Sentinel generates tests (None if unavailable)
+          - impl_prompt: Phase 2 — Claude implements the fix until tests pass
         """
         identifier = issue["identifier"]
         issue_id = issue["id"]
@@ -95,8 +110,15 @@ class DeveloperSkill:
         project_name = (issue.get("project") or {}).get("name")
         repos = self._resolve_repos(issue, labels, team_key, project_name, parent_info)
 
-        # Step 4: Build scope-aware prompt
-        prompt = self._build_prompt(
+        # Step 4: Build Phase 1 prompt (Sentinel test generation)
+        test_prompt: str | None = None
+        if self.sentinel:
+            test_prompt = self.sentinel.build_test_prompt(
+                enriched, worktree_path, repo_name,
+            )
+
+        # Step 5: Build Phase 2 prompt (implementation with TDD rules)
+        impl_prompt = self._build_prompt(
             enriched, scope_type, parent_info, sub_tasks,
             worktree_path, repo_name,
         )
@@ -106,7 +128,8 @@ class DeveloperSkill:
             title=issue["title"],
             scope_type=scope_type,
             repos=repos,
-            prompt=prompt,
+            test_prompt=test_prompt,
+            impl_prompt=impl_prompt,
             enriched_context=enriched,
         )
 

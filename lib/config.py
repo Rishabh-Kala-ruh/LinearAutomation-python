@@ -28,5 +28,12 @@ except json.JSONDecodeError:
 
 MAX_CONCURRENT_TICKETS: int = int(os.getenv("MAX_CONCURRENT_TICKETS", "2"))
 
+# Path to Sentinel Guardian skills directory (for test generation)
+# Set to empty string or omit to disable Sentinel integration
+SENTINEL_SKILLS_PATH: str = os.getenv(
+    "SENTINEL_SKILLS_PATH",
+    os.path.expanduser("~/.openclaw/workspace/sentinel-guardian/skills"),
+)
+
 PROCESSING_LABEL = "claude-processing"
 DONE_LABEL = "claude-done"
