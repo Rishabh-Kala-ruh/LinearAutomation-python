@@ -29,11 +29,10 @@ except json.JSONDecodeError:
 MAX_CONCURRENT_TICKETS: int = int(os.getenv("MAX_CONCURRENT_TICKETS", "2"))
 
 # Path to Sentinel Guardian skills directory (for test generation)
-# Set to empty string or omit to disable Sentinel integration
-SENTINEL_SKILLS_PATH: str = os.getenv(
-    "SENTINEL_SKILLS_PATH",
-    os.path.expanduser("~/.openclaw/workspace/sentinel-guardian/skills"),
-)
+# In Docker: mounted at /app/sentinel-skills via docker-compose.yml
+# On laptop: defaults to ~/.openclaw/workspace/sentinel-guardian/skills
+_default_sentinel = "/app/sentinel-skills" if os.path.exists("/app/sentinel-skills") else os.path.expanduser("~/.openclaw/workspace/sentinel-guardian/skills")
+SENTINEL_SKILLS_PATH: str = os.getenv("SENTINEL_SKILLS_PATH", _default_sentinel)
 
 PROCESSING_LABEL = "claude-processing"
 DONE_LABEL = "claude-done"

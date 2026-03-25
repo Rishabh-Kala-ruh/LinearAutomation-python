@@ -25,6 +25,8 @@ services:
       - claude-data:/root/.claude
       # Persist gh CLI credentials
       - gh-data:/root/.config/gh
+      # Mount Sentinel Guardian skills for test generation (read-only)
+      - ${SENTINEL_SKILLS_PATH:-~/.openclaw/workspace/sentinel-guardian/skills}:/app/sentinel-skills:ro
 
 volumes:
   repos-data:
