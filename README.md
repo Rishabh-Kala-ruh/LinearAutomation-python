@@ -14,36 +14,36 @@ Automatically picks up Linear tickets assigned to you, uses **Claude Code AI** t
 |  |                           |    |  +---------------------------+ |  |
 |  |  Cron Job: every 1 hour --+--->|  | python3 run_once.py       | |  |
 |  |  "linear-ticket-scan"     |    |  |                           | |  |
-|  |                           |    |  | 1. Linear API (fetch)     | |  |
-|  +---------------------------+    |  | 2. Ticket Enricher        | |  |
-|                                   |  | 3. Git (clone/worktree)   | |  |
-|                                   |  | 4. Claude Code (fix code) | |  |
-|                                   |  | 5. Git push + gh pr       | |  |
-|                                   |  | 6. Linear API (update)    | |  |
-|                                   |  +---------------------------+ |  |
-|                                   +--------------------------------+  |
+|  |                           |    |  | Phase 1: COLLECT           | |  |
+|  +---------------------------+    |  |   Fetch + sort by priority | |  |
+|                                   |  | Phase 2: PREPARE           | |  |
+|  +---------------------------+    |  |   Clone/update repos (||)  | |  |
+|  |  GitHub Actions           |    |  | Phase 3: EXECUTE           | |  |
+|  |  (auto-deploy)            |    |  |   N tickets in parallel    | |  |
+|  |                           |    |  |   Claude Code + PR + done  | |  |
+|  |  PR merged → main         |    |  +---------------------------+ |  |
+|  |    → SSH → git pull        |    |                                |  |
+|  |    → docker compose up    |    +--------------------------------+  |
+|  +---------------------------+                                       |
 +-----------------------------------------------------------------------+
 ```
 
 ## How It Works
 
-### Step 1: Scheduled Trigger (Every 1 Hour)
+### Phase 1: COLLECT — Fetch and Prioritize
 
-OpenClaw daemon runs as a systemd service on the server with a cron job that fires every hour. It executes:
+**Trigger:** OpenClaw daemon fires every hour, or the Docker container runs continuously.
 
-```bash
-docker exec linear-automation python3 run_once.py
-```
+The script connects to the Linear GraphQL API with a **single batch query** that fetches issues with labels and project inline (fewer API calls). It filters:
 
-### Step 2: Fetch Tickets from Linear
-
-The script connects to the Linear GraphQL API and fetches tickets where:
 - **Assignee = you** (only your tickets)
 - **Status = "unstarted" or "started"** (Todo / In Progress)
 - Skips tickets already processed (tracked in `processed_issues.json`)
 - Skips tickets with labels `claude-processing` or `claude-done`
 
-### Step 3: Detect Target Repositories
+Then **sorts by priority**: Urgent → High → Medium → Low → None. Urgent tickets always get processed first.
+
+### Phase 2: PREPARE — Clone Repos in Parallel
 
 Each ticket is mapped to one or more GitHub repos using this priority:
 
@@ -55,15 +55,19 @@ Each ticket is mapped to one or more GitHub repos using this priority:
 | 4 | Linear project name | Project "frontend" |
 | 5 | Team key (fallback) | Team "ENG" |
 
-One ticket can target **multiple repos** via multiple `repo:` labels.
+All **unique repos are cloned/updated in parallel** (up to 4 at once). Each repo is only fetched once even if multiple tickets target it.
 
-### Step 4: Move Ticket to "In Progress"
+### Phase 3: EXECUTE — Process Tickets in Parallel
 
-The Linear issue state is transitioned to `started` so your team sees it's being worked on.
+Up to `MAX_CONCURRENT_TICKETS` (default: 2) tickets are processed simultaneously using a thread pool. Each ticket runs independently in its own git worktree.
 
-### Step 5: Enrich Ticket Context
+For each ticket (in parallel):
 
-The **Ticket Enricher** (`skills/ticket_enricher.py`) extracts deep context:
+#### 1. Move Ticket to "In Progress"
+The Linear issue state is transitioned to `started`.
+
+#### 2. Enrich Ticket Context
+The **Ticket Enricher** (`skills/ticket_enricher.py`) extracts deep context with **all 7 API calls fired in parallel**:
 
 - Full description + all comments (team discussion)
 - Sub-issues / child tasks
@@ -73,22 +77,10 @@ The **Ticket Enricher** (`skills/ticket_enricher.py`) extracts deep context:
 - Acceptance criteria (parsed from description)
 - File hints (file paths and code references from description + comments)
 
-This rich context produces much more accurate fixes from Claude Code.
+#### 3. Create Worktree
+An isolated git worktree is created at `.worktrees/claude/<ticket-id>` based on `origin/dev`. Per-repo locks prevent concurrent git operations on the same repo.
 
-### Step 6: Prepare the Repository
-
-For each target repo:
-
-1. **Check REPO_MAP** -- use pre-configured local path if available
-2. **Auto-clone** -- if not in REPO_MAP, clone from GitHub using SSH
-3. **Update** -- `git fetch` + checkout `dev` (or `main`/`master`)
-4. **Create worktree** -- isolated branch `claude/<ticket-id>` based on `origin/dev`
-
-Worktrees provide full isolation -- each ticket gets its own directory and branch. The main checkout stays clean.
-
-### Step 7: Claude Code Fixes the Code
-
-This is the core AI coding step:
+#### 4. Claude Code Fixes the Code
 
 ```bash
 claude -p "$(cat prompt.txt)" \
@@ -113,7 +105,7 @@ Claude Code autonomously:
 
 If it cannot fix the issue, it creates `CLAUDE_UNABLE.md` explaining why.
 
-### Step 8: Push and Create PR
+#### 5. Push and Create PR
 
 ```bash
 git push origin "claude/<ticket-id>"
@@ -124,20 +116,35 @@ gh pr create --base dev --head "claude/<ticket-id>" --title "fix(TICKET-ID): tit
 - Creates PR targeting `dev` branch (falls back to `main`)
 - PR body includes ticket title, Linear link, and description
 
-### Step 9: Update Linear
+#### 6. Update Linear
 
 On success:
 - Moves ticket to **"Done"**
 - Comments on the ticket with PR link(s)
-- Marks ticket as processed
+- Marks ticket as processed (thread-safe with lock)
 
 On failure:
 - Does **NOT** mark as processed -- retries on next hourly run
 
-### Step 10: Cleanup
-
+#### 7. Cleanup
 - Removes the worktree (frees disk space)
 - Logs everything to `logs/automation.log`
+
+## CI/CD — Auto-Deploy on Merge
+
+A GitHub Actions workflow (`.github/workflows/deploy.yml`) automatically deploys to the server when a PR is merged to `main`:
+
+```
+PR merged → main → GitHub Actions → SSH into server → git pull → docker compose up --build -d
+```
+
+### Required GitHub Secrets
+
+| Secret | Value |
+|--------|-------|
+| `SERVER_HOST` | Server IP address |
+| `SERVER_USER` | SSH username |
+| `SERVER_SSH_KEY` | Private SSH key (contents of `~/.ssh/id_ed25519`) |
 
 ## Project Structure
 
@@ -147,12 +154,15 @@ linear-automation-python/
 |-- run_once.py                    # Single scan mode (used by cron)
 |-- lib/
 |   |-- config.py                  # Environment config loader
-|   |-- core.py                    # Shared core logic
+|   |-- core.py                    # 3-phase processing engine
 |   +-- linear_client.py           # Linear GraphQL API client
 |-- skills/
 |   +-- ticket_enricher.py         # Deep context extraction from Linear/Jira
 |-- openclaw-skill/
 |   +-- SKILL.md                   # OpenClaw skill definition
+|-- .github/
+|   +-- workflows/
+|       +-- deploy.yml             # Auto-deploy on merge to main
 |-- requirements.txt               # Python dependencies
 |-- .env.example                   # Config template
 |-- Dockerfile                     # Docker image definition
@@ -183,10 +193,10 @@ repos/
 
 | Service | Auth Method | Config Location |
 |---------|-------------|-----------------|
-| **Linear** | API Key | `.env` -> `LINEAR_API_KEY` |
-| **Claude Code** | OAuth Token (Pro subscription) | `.env` -> `CLAUDE_CODE_OAUTH_TOKEN` |
+| **Linear** | API Key | `.env` → `LINEAR_API_KEY` |
+| **Claude Code** | OAuth Token (Pro subscription) | `.env` → `CLAUDE_CODE_OAUTH_TOKEN` |
 | **GitHub (push)** | SSH Key | Server `~/.ssh/id_ed25519` mounted in Docker |
-| **GitHub (PR)** | Personal Access Token | `.env` -> `GH_TOKEN` |
+| **GitHub (PR)** | Personal Access Token | `.env` → `GH_TOKEN` |
 
 ## Setup
 
@@ -217,15 +227,16 @@ GH_TOKEN=github_pat_your_token_here
 CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-your_token_here
 TARGET_BRANCH=dev
 POLL_INTERVAL_MINUTES=60
+MAX_CONCURRENT_TICKETS=2
 ```
 
 ### 2. Get Your Tokens
 
 **Linear API Key:**
-Go to [linear.app/settings/api](https://linear.app/settings/api) -> Create key
+Go to [linear.app/settings/api](https://linear.app/settings/api) → Create key
 
 **GitHub Personal Access Token:**
-Go to [github.com/settings/tokens](https://github.com/settings/tokens) -> Generate new token (with `repo` scope)
+Go to [github.com/settings/tokens](https://github.com/settings/tokens) → Generate new token (with `repo` scope)
 
 **Claude Code OAuth Token:**
 ```bash
@@ -263,6 +274,8 @@ docker exec -it linear-automation claude setup-token
 # Verify
 docker exec linear-automation claude auth status
 ```
+
+After initial setup, all future deployments are automatic via GitHub Actions (merge PR → auto-deploy).
 
 ### 4. Setup OpenClaw Scheduler (Optional)
 
@@ -302,6 +315,7 @@ python run_once.py      # Single scan
 | `LOGS_DIR` | Directory for logs | `./logs` |
 | `REPO_MAP` | JSON mapping repo names to local paths | `{}` |
 | `POLL_INTERVAL_MINUTES` | Scan interval in minutes | `60` |
+| `MAX_CONCURRENT_TICKETS` | Max tickets processed in parallel | `2` |
 
 ### REPO_MAP
 
@@ -319,7 +333,8 @@ For the automation to pick up a ticket:
 
 1. **Assign it to yourself**
 2. **Set status** to Todo or In Progress
-3. **Link to a repo** using one of:
+3. **Set priority** -- Urgent/High tickets are processed first
+4. **Link to a repo** using one of:
    - Label: `repo:exact-repo-name`
    - GitHub URL in description: `https://github.com/owner/repo`
    - Text in description: `Repository: repo-name`
@@ -327,17 +342,17 @@ For the automation to pick up a ticket:
 ## Retry Logic
 
 ```
-Ticket found -> attempt fix
+Ticket found → sorted by priority → processed in parallel
     |
     |-- Success (PR created)
-    |     -> Mark as processed (won't re-scan)
-    |     -> Move ticket to "Done"
-    |     -> Comment PR link on ticket
+    |     → Mark as processed (won't re-scan)
+    |     → Move ticket to "Done"
+    |     → Comment PR link on ticket
     |
     +-- Failure (clone error, Claude error, no changes)
-          -> Do NOT mark as processed
-          -> Will retry on next hourly run
-          -> Stale worktrees/branches auto-cleaned
+          → Do NOT mark as processed
+          → Will retry on next hourly run
+          → Stale worktrees/branches auto-cleaned
 ```
 
 ## Useful Commands
@@ -357,21 +372,22 @@ docker exec linear-automation cat /app/logs/claude_RUH-6.log
 # Clear processed tickets (re-scan all)
 docker exec linear-automation rm /app/logs/processed_issues.json
 
-# Rebuild after code changes
-docker compose up -d --build
+# Rebuild after code changes (auto — just merge a PR)
+# Manual: docker compose up -d --build
 ```
 
 ## Tech Stack
 
 | Component | Technology | Role |
 |-----------|-----------|------|
-| Orchestrator | Python 3.12 | Fetches tickets, manages git, creates PRs |
+| Orchestrator | Python 3.12 | 3-phase parallel processing engine |
 | AI Coder | Claude Code CLI | Reads codebase, writes fixes, commits |
 | Scheduler | OpenClaw | Cron daemon, triggers hourly scans |
 | Container | Docker | Isolates the runtime environment |
-| Ticket Mgmt | Linear GraphQL API | Fetches/updates tickets via `requests` |
+| CI/CD | GitHub Actions | Auto-deploy on merge to main |
+| Ticket Mgmt | Linear GraphQL API | Batch queries via `requests` |
 | Git Hosting | GitHub | Hosts repos, PRs via `gh` CLI |
-| Enrichment | Ticket Enricher | Extracts deep context from tickets |
+| Enrichment | Ticket Enricher | Parallel context extraction from tickets |
 
 ## Cost
 
@@ -381,6 +397,7 @@ docker compose up -d --build
 | Claude Code | Existing Pro subscription ($20/mo) |
 | Linear API | Free |
 | GitHub API | Free |
+| GitHub Actions | Free (2,000 min/month) |
 | Server | Your existing VM |
 
 ## License
