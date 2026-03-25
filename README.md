@@ -107,9 +107,13 @@ claude -p "$(cat prompt.txt)" \
 - **15 minute timeout** per ticket
 - **Auth**: Claude Pro subscription via OAuth token
 
-Claude Code autonomously:
-1. Reads the codebase and understands the structure
-2. Reads relevant files based on enriched context and file hints
+Claude Code follows **Test-Driven Development (TDD)**:
+
+1. **Understand** — reads the codebase and understands the structure
+2. **Write tests first** — creates test cases based on acceptance criteria, edge cases from comments, and the ticket description. Commits tests separately.
+3. **Verify tests fail** — confirms the tests fail before implementation (proving they test the right thing)
+4. **Implement** — writes the fix/feature to make all tests pass
+5. **Never edit tests** — if tests fail after implementation, the code is fixed, NOT the tests. Tests are the contract.
 3. Writes/edits code to fix the issue
 4. Stages all changes
 5. Commits with message: `fix(TICKET-ID): short summary`

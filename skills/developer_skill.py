@@ -376,23 +376,51 @@ Those are assigned to other developers. Only implement what is NOT covered by an
 plus any sub-tasks that are assigned to you.
 """)
 
-        sections.append(f"""1. **Read and analyze** the codebase — start with the files/symbols mentioned above.
+        sections.append(f"""You MUST follow **Test-Driven Development (TDD)**. Tests are the contract — code adapts to pass them.
+
+### Phase 1: UNDERSTAND (do not write code yet)
+1. **Read and analyze** the codebase — start with the files/symbols mentioned above.
 2. **Understand the full context** — the description, acceptance criteria, AND the discussion thread all matter.
-3. **Implement the fix or feature** described in the ticket. Follow existing code style.
-4. **Handle edge cases** mentioned in the comments.
-5. **Stage and commit ALL changes** with this commit message format:
-   `fix({context.id}): <short summary of what was changed>`
-6. Do NOT push. Do NOT create a PR. Just commit locally.
-7. If you cannot fix the issue, create `CLAUDE_UNABLE.md` explaining exactly why.
+3. **Identify the testing framework** already used in this repo (e.g., pytest, jest, mocha, go test, etc.). Use the same framework and conventions.
+
+### Phase 2: WRITE TESTS FIRST
+4. **Write test cases** that define the expected behavior for this ticket:
+   - Cover the main fix/feature described in the ticket
+   - Cover each acceptance criterion as at least one test
+   - Cover edge cases mentioned in comments
+   - Place tests in the appropriate test directory following the repo's existing test structure
+5. **Commit the tests** with message: `test({context.id}): add tests for <short summary>`
+6. **Run the tests** — they MUST fail at this point (since the implementation doesn't exist yet). If they pass, your tests aren't testing the right thing — fix them.
+
+### Phase 3: IMPLEMENT (make tests pass)
+7. **Implement the fix or feature** described in the ticket. Follow existing code style.
+8. **Run the tests again** after implementation.
+9. **If tests fail**: fix your IMPLEMENTATION code, NOT the tests. Repeat until all tests pass.
+10. **Commit the implementation** with message: `fix({context.id}): <short summary of what was changed>`
+
+### Phase 4: VERIFY
+11. **Run the full test suite** (not just your new tests) to ensure no regressions.
+12. If existing tests break, fix the implementation — do NOT modify existing tests unless they are genuinely testing wrong behavior.
+
+## CRITICAL RULES
+- **NEVER edit or delete test files after Phase 2.** Tests are the source of truth. If your code doesn't pass, fix the code.
+- **NEVER weaken a test** to make it pass (e.g., removing assertions, loosening checks, catching exceptions in tests).
+- **NEVER skip or disable tests** (no `@pytest.mark.skip`, no `.skip()`, no `xit()`).
+- Do NOT push. Do NOT create a PR. Just commit locally.
+- If you cannot fix the issue, create `CLAUDE_UNABLE.md` explaining exactly why.
 
 ### Quality Checklist
-- [ ] All acceptance criteria are met
-- [ ] Edge cases from comments are handled
-- [ ] No regressions introduced
+- [ ] Tests written BEFORE implementation
+- [ ] Tests committed separately from implementation
+- [ ] All new tests pass
+- [ ] All existing tests still pass (no regressions)
+- [ ] All acceptance criteria have corresponding tests
+- [ ] Edge cases from comments are tested
 - [ ] Code follows existing patterns and style
 - [ ] Changes are minimal and focused — don't refactor unrelated code
+- [ ] Test files were NOT modified after initial test commit
 {f'- [ ] Only sub-task {context.id} scope is implemented (no parent scope leakage)' if scope_type == "subtask" else ''}
 {f'- [ ] Other developers sub-tasks are NOT touched' if scope_type == "parent_with_subtasks" and any(not s.is_mine for s in sub_tasks) else ''}
-**Important: Commit your changes before finishing.**""")
+**Important: You should have exactly 2 commits — one for tests, one for implementation.**""")
 
         return "\n".join(sections)
