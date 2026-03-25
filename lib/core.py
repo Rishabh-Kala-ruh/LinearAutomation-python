@@ -25,7 +25,6 @@ from lib.config import (
     MAX_CONCURRENT_TICKETS, SENTINEL_SKILLS_PATH,
 )
 from lib.linear_client import LinearClient
-from skills.ticket_enricher import LinearEnricher, EnrichedContext, build_enriched_prompt
 from skills.developer_skill import DeveloperSkill, DeveloperResult
 
 
@@ -40,7 +39,6 @@ class RepoEntry:
 # ── Init ─────────────────────────────────────────────────────────────────────
 
 linear = LinearClient(LINEAR_API_KEY)
-enricher = LinearEnricher(LINEAR_API_KEY)
 # Developer skill is initialized after we know the viewer_id (in process_tickets)
 dev_skill: DeveloperSkill | None = None
 
@@ -266,71 +264,54 @@ def run_claude_code(
     with open(log_file, "w") as f:
         f.write(f"# Claude Code log for {identifier}\n")
 
+    if not dev_skill:
+        log(f"ERROR: Developer Skill not initialized for {identifier}")
+        return False
+
     # Use developer skill for scope-aware prompt building
-    test_prompt: str | None = None
-    impl_prompt: str
+    log(f"Developer Skill processing {identifier}...")
+    try:
+        result = dev_skill.process(issue, team_key, worktree_path, repo_name)
+    except RuntimeError as err:
+        log(f"FAILED: {identifier} — {err}")
+        with open(log_file, "a") as f:
+            f.write(f"\nFAILED: {err}\n")
+        return False
 
-    if dev_skill:
-        log(f"Developer Skill processing {identifier}...")
-        try:
-            result = dev_skill.process(issue, team_key, worktree_path, repo_name)
-            test_prompt = result.test_prompt
-            impl_prompt = result.impl_prompt
-            ctx = result.enriched_context
-            log(
-                f"Scope: {result.scope_type} | "
-                f"Sentinel: {'enabled' if test_prompt else 'disabled'} | "
-                f"Enriched: {len(ctx.comments)} comments, "
-                f"{len(ctx.sub_issues)} sub-issues, "
-                f"{len(ctx.relations)} relations, "
-                f"{len(ctx.file_hints)} file hints"
-            )
-        except Exception as err:
-            log(f"Developer Skill failed, falling back to basic enrichment: {err}")
-            impl_prompt = _fallback_prompt(issue, worktree_path, repo_name)
-    else:
-        impl_prompt = _fallback_prompt(issue, worktree_path, repo_name)
+    ctx = result.enriched_context
+    log(
+        f"Scope: {result.scope_type} | Stack: {result.stack_type} | "
+        f"Test phases: {len(result.test_phases)} | "
+        f"Enriched: {len(ctx.comments)} comments, "
+        f"{len(ctx.sub_issues)} sub-issues, "
+        f"{len(ctx.relations)} relations, "
+        f"{len(ctx.file_hints)} file hints"
+    )
 
-    # ── Phase 1: Sentinel Test Generation ─────────────────────────────
-    if test_prompt:
-        test_prompt_file = os.path.join(LOGS_DIR, f"prompt_test_{identifier}.txt")
-        with open(test_prompt_file, "w") as f:
-            f.write(test_prompt)
+    # ── Sentinel Test Phases (sequential) ─────────────────────────────
+    total_phases = len(result.test_phases)
+    for i, (skill_name, prompt) in enumerate(result.test_phases, 1):
+        phase_label = f"Phase {i}/{total_phases}: {skill_name}"
+        prompt_file = os.path.join(LOGS_DIR, f"prompt_{skill_name}_{identifier}.txt")
+        with open(prompt_file, "w") as f:
+            f.write(prompt)
 
-        phase1_ok = _run_claude(identifier, test_prompt_file, log_file, worktree_path, "Phase 1: Test Generation")
-        if not phase1_ok:
-            log(f"Phase 1 (test generation) failed for {identifier} — skipping implementation")
+        log(f"[{identifier}] Starting {phase_label}...")
+        ok = _run_claude(identifier, prompt_file, log_file, worktree_path, phase_label)
+        if not ok:
+            log(f"[{identifier}] {phase_label} failed — stopping test generation")
             return False
+        log(f"[{identifier}] {phase_label} complete.")
 
-        log(f"Phase 1 complete for {identifier} — tests committed. Starting Phase 2...")
-    else:
-        log(f"Sentinel not available — running single-phase TDD for {identifier}")
-
-    # ── Phase 2: Implementation ───────────────────────────────────────
+    # ── Final Phase: Implementation ───────────────────────────────────
+    log(f"[{identifier}] All test phases complete. Starting implementation...")
     impl_prompt_file = os.path.join(LOGS_DIR, f"prompt_impl_{identifier}.txt")
     with open(impl_prompt_file, "w") as f:
-        f.write(impl_prompt)
+        f.write(result.impl_prompt)
 
-    return _run_claude(identifier, impl_prompt_file, log_file, worktree_path, "Phase 2: Implementation")
+    return _run_claude(identifier, impl_prompt_file, log_file, worktree_path, "Final Phase: Implementation")
 
 
-def _fallback_prompt(issue: dict[str, Any], worktree_path: str, repo_name: str) -> str:
-    """Fallback when developer skill is unavailable."""
-    try:
-        enriched_context = enricher.enrich(issue)
-    except Exception:
-        enriched_context = EnrichedContext(
-            source="linear",
-            id=issue["identifier"],
-            title=issue["title"],
-            description=issue.get("description") or "No description.",
-            url=issue["url"],
-            priority="Unknown",
-            status="Unknown",
-            created_at=issue.get("createdAt", ""),
-            updated_at=issue.get("updatedAt", ""),
-        )
-    return build_enriched_prompt(enriched_context, worktree_path, repo_name)
 
 
 # ── PR Creation ──────────────────────────────────────────────────────────────
@@ -500,8 +481,13 @@ def process_tickets() -> None:
             LINEAR_API_KEY, me["id"], GITHUB_ORG,
             sentinel_skills_path=SENTINEL_SKILLS_PATH,
         )
-        sentinel_status = "enabled" if dev_skill.sentinel else "disabled (path not found)"
-        log(f"Sentinel Guardian: {sentinel_status}")
+        if not dev_skill.sentinel_available:
+            log("ERROR: Sentinel Guardian skills not found! Tickets will NOT be processed.")
+            log(f"  Expected path: {SENTINEL_SKILLS_PATH}")
+            log("  Ensure skills are mounted in Docker or exist at the configured path.")
+        else:
+            available_skills = dev_skill.sentinel.get_available_skills()
+            log(f"Sentinel Guardian: enabled ({len(available_skills)} skills available)")
 
         teams = linear.get_teams()
 

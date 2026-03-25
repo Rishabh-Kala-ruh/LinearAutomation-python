@@ -5,17 +5,17 @@ Sits between ticket fetching and Claude Code execution.
 Handles scope resolution, repo inheritance, and smart prompt building
 for all cases: normal tickets, parent tickets with sub-tasks, and sub-tasks.
 
-Two-phase TDD flow:
-  Phase 1: Sentinel Guardian generates tests (test_prompt)
-  Phase 2: Developer implements the fix until tests pass (impl_prompt)
+Multi-phase TDD flow (Sentinel is REQUIRED):
+  Phase 1..N: Sentinel Guardian generates tests sequentially (one skill per phase)
+  Final Phase: Developer implements the fix until ALL tests pass
 
 Usage:
     from skills.developer_skill import DeveloperSkill
 
-    skill = DeveloperSkill(linear_api_key, viewer_id)
+    skill = DeveloperSkill(linear_api_key, viewer_id, sentinel_skills_path="/app/sentinel-skills")
     result = skill.process(issue, team_key, worktree_path, repo_name)
-    # result.test_prompt  — Phase 1: Sentinel test generation prompt (None if Sentinel unavailable)
-    # result.impl_prompt  — Phase 2: implementation prompt (with TDD rules)
+    # result.test_phases  — list of (skill_name, prompt) for sequential test generation
+    # result.impl_prompt  — final phase: implementation prompt
     # result.repos        — resolved repo entries
     # result.scope_type   — "normal" | "parent_with_subtasks" | "subtask"
 """
@@ -59,9 +59,10 @@ class DeveloperResult:
     title: str
     scope_type: str  # "normal" | "parent_with_subtasks" | "subtask"
     repos: list[RepoEntry]
-    test_prompt: str | None  # Phase 1: Sentinel test generation (None if unavailable)
-    impl_prompt: str         # Phase 2: implementation (always present)
+    test_phases: list[tuple[str, str]]  # Sequential Sentinel phases: [(skill_name, prompt), ...]
+    impl_prompt: str                     # Final phase: implementation
     enriched_context: EnrichedContext
+    stack_type: str = "backend"          # "backend" | "frontend" | "fullstack"
 
 
 @dataclass
@@ -105,25 +106,39 @@ class DeveloperSkill:
     def __init__(
         self, api_key: str, viewer_id: str,
         github_org: str = "ruh-ai",
-        sentinel_skills_path: str | None = None,
+        sentinel_skills_path: str = "",
     ) -> None:
         self.client = LinearClient(api_key)
         self.enricher = LinearEnricher(api_key)
         self.viewer_id = viewer_id
         self.github_org = github_org
-        self.sentinel: SentinelTestGenerator | None = None
 
+        # Sentinel is REQUIRED — test generation must always run
         if sentinel_skills_path and os.path.isdir(sentinel_skills_path):
             self.sentinel = SentinelTestGenerator(sentinel_skills_path)
+        else:
+            self.sentinel = None
+
+    @property
+    def sentinel_available(self) -> bool:
+        return self.sentinel is not None and self.sentinel.available
 
     def process(
         self, issue: dict[str, Any], team_key: str, worktree_path: str, repo_name: str
     ) -> DeveloperResult:
         """
-        Main entry point. Resolves scope, repos, and builds two prompts:
-          - test_prompt: Phase 1 — Sentinel generates tests (None if unavailable)
-          - impl_prompt: Phase 2 — Claude implements the fix until tests pass
+        Main entry point. Resolves scope, repos, and builds sequential test phases + implementation prompt.
+
+        Raises RuntimeError if Sentinel skills are not available.
         """
+        # Sentinel is mandatory — fail early if not available
+        if not self.sentinel_available:
+            raise RuntimeError(
+                "Sentinel Guardian skills not found. "
+                "Test generation is required before implementation. "
+                "Ensure SENTINEL_SKILLS_PATH is set and skills are mounted."
+            )
+
         identifier = issue["identifier"]
         issue_id = issue["id"]
 
@@ -138,14 +153,17 @@ class DeveloperSkill:
         project_name = (issue.get("project") or {}).get("name")
         repos = self._resolve_repos(issue, labels, team_key, project_name, parent_info)
 
-        # Step 4: Build Phase 1 prompt (Sentinel test generation)
-        test_prompt: str | None = None
-        if self.sentinel:
-            test_prompt = self.sentinel.build_test_prompt(
-                enriched, worktree_path, repo_name,
+        # Step 4: Detect stack and build sequential Sentinel test phases
+        stack_type = self.sentinel.detect_stack(worktree_path)
+        test_phases = self.sentinel.build_test_phases(enriched, worktree_path, repo_name)
+
+        if not test_phases:
+            raise RuntimeError(
+                f"No Sentinel test skills could be loaded for stack '{stack_type}'. "
+                "Check that SKILL.md files exist in the Sentinel skills directory."
             )
 
-        # Step 5: Build Phase 2 prompt (implementation with TDD rules)
+        # Step 5: Build final implementation prompt (with TDD rules)
         impl_prompt = self._build_prompt(
             enriched, scope_type, parent_info, sub_tasks,
             worktree_path, repo_name,
@@ -156,9 +174,10 @@ class DeveloperSkill:
             title=issue["title"],
             scope_type=scope_type,
             repos=repos,
-            test_prompt=test_prompt,
+            test_phases=test_phases,
             impl_prompt=impl_prompt,
             enriched_context=enriched,
+            stack_type=stack_type,
         )
 
     # ── Scope Resolution ─────────────────────────────────────────────────
