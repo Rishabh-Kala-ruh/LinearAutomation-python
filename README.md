@@ -107,24 +107,29 @@ claude -p "$(cat prompt.txt)" \
 - **15 minute timeout** per ticket
 - **Auth**: Claude Pro subscription via OAuth token
 
-Claude Code follows **Test-Driven Development (TDD)** in two phases:
+Claude Code follows **Test-Driven Development (TDD)** with sequential Sentinel phases. **Sentinel Guardian is required** — tickets will NOT be processed without it.
 
-**Phase 1 — Sentinel Test Generation** (if Sentinel Guardian is available):
-- Loads Sentinel Guardian testing skills (`test-setup`, `unit-tests`)
-- Generates comprehensive test cases based on acceptance criteria, edge cases, and the ticket description
-- Commits tests separately: `test(TICKET-ID): add tests for ...`
-- Verifies tests FAIL (since the fix doesn't exist yet)
+**Stack auto-detection** determines which test skills to run:
 
-**Phase 2 — Implementation**:
-- Reads the codebase and the tests from Phase 1
+| Stack | Detection | Skills Used |
+|-------|-----------|-------------|
+| **Backend** | `requirements.txt`, `go.mod`, `Cargo.toml`, etc. | test-setup → unit-tests → integration-tests → contract-tests → security-tests → resilience-tests → smoke-tests → e2e-api-tests → test-review |
+| **Frontend** | `next.config.js`, React/Vue in `package.json`, etc. | test-setup → unit-tests → e2e-browser-tests → test-review |
+| **Full-stack** | Both backend + frontend signals | All skills |
+
+Each skill runs as a **separate Claude Code invocation** (focused, accurate):
+
+**Phase 1..N — Sentinel Test Generation** (one skill per phase):
+- Each phase loads one Sentinel SKILL.md (e.g., `unit-tests`, `security-tests`)
+- Generates tests specific to that category, based on ticket requirements
+- Commits tests: `test(TICKET-ID): add {skill-name} for ...`
+- Each phase builds on tests from previous phases (no duplicates)
+
+**Final Phase — Implementation**:
+- Reads the codebase and ALL tests from previous phases
 - Implements the fix/feature to make all tests pass
 - **Never edits test files** — if tests fail, the code is fixed, NOT the tests
 - Commits implementation: `fix(TICKET-ID): ...`
-
-If Sentinel is not available, falls back to single-phase TDD where Claude writes both tests and implementation.
-3. Writes/edits code to fix the issue
-4. Stages all changes
-5. Commits with message: `fix(TICKET-ID): short summary`
 
 If it cannot fix the issue, it creates `CLAUDE_UNABLE.md` explaining why.
 
@@ -142,7 +147,7 @@ gh pr create --base dev --head "claude/<ticket-id>" --title "fix(TICKET-ID): tit
 #### 6. Update Linear
 
 On success:
-- Moves ticket to **"Done"**
+- Moves ticket to **"Code Review"**
 - Comments on the ticket with PR link(s)
 - Marks ticket as processed (thread-safe with lock)
 

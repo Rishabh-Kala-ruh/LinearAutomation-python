@@ -1,33 +1,83 @@
 """
 Sentinel Guardian Integration — loads Sentinel testing skills and builds
-test-generation prompts for Claude Code.
+sequential per-skill prompts for Claude Code.
 
-Sentinel skills are SKILL.md files that contain expert-level instructions
-for generating specific types of tests (unit, integration, security, etc.).
-
-This module reads those skills from disk and combines them with ticket context
-to produce a test-generation prompt that Claude Code executes BEFORE implementation.
+Each Sentinel skill runs as a separate Claude Code invocation (phase).
+Stack detection determines which skills apply to the repo.
 
 Usage:
     from skills.sentinel_integration import SentinelTestGenerator
 
     gen = SentinelTestGenerator("/path/to/sentinel-guardian/skills")
-    prompt = gen.build_test_prompt(enriched_context, worktree_path, repo_name)
+    phases = gen.build_test_phases(enriched_context, worktree_path, repo_name)
+    # phases = [("test-setup", "prompt..."), ("unit-tests", "prompt..."), ...]
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
 
 from skills.ticket_enricher import EnrichedContext
 
 
-# Skills to invoke in order. test-setup runs first (once per repo),
-# then unit-tests for the actual test generation.
-# More skills can be added here as needed (integration-tests, security-tests, etc.)
-DEFAULT_SKILL_CHAIN = ["test-setup", "unit-tests"]
+# ── Skill chains by stack type ───────────────────────────────────────────────
+
+BACKEND_SKILLS = [
+    "test-setup",
+    "unit-tests",
+    "integration-tests",
+    "contract-tests",
+    "security-tests",
+    "resilience-tests",
+    "smoke-tests",
+    "e2e-api-tests",
+    "test-review",
+]
+
+FRONTEND_SKILLS = [
+    "test-setup",
+    "unit-tests",
+    "e2e-browser-tests",
+    "test-review",
+]
+
+FULLSTACK_SKILLS = [
+    "test-setup",
+    "unit-tests",
+    "integration-tests",
+    "contract-tests",
+    "security-tests",
+    "resilience-tests",
+    "smoke-tests",
+    "e2e-api-tests",
+    "e2e-browser-tests",
+    "test-review",
+]
+
+
+# ── Stack detection signals ──────────────────────────────────────────────────
+
+# Files that indicate a backend repo
+BACKEND_SIGNALS = [
+    "requirements.txt", "pyproject.toml", "setup.py", "Pipfile",  # Python
+    "go.mod",  # Go
+    "Cargo.toml",  # Rust
+    "pom.xml", "build.gradle",  # Java
+    "Gemfile",  # Ruby
+]
+
+# Files that indicate a frontend repo
+FRONTEND_SIGNALS = [
+    "next.config.js", "next.config.ts", "next.config.mjs",  # Next.js
+    "vite.config.ts", "vite.config.js",  # Vite
+    "angular.json",  # Angular
+    "svelte.config.js",  # Svelte
+    "nuxt.config.ts",  # Nuxt
+]
+
+# package.json dependencies that indicate frontend
+FRONTEND_DEPS = {"react", "next", "vue", "angular", "svelte", "nuxt"}
 
 
 @dataclass
@@ -39,15 +89,15 @@ class SentinelSkill:
 
 class SentinelTestGenerator:
     def __init__(self, skills_path: str) -> None:
-        """
-        Initialize with the path to Sentinel Guardian's skills directory.
-        e.g., /home/rishabh/.openclaw/workspace/sentinel-guardian/skills
-        """
         self.skills_path = skills_path
         self._cache: dict[str, SentinelSkill] = {}
 
+    @property
+    def available(self) -> bool:
+        """Check if Sentinel skills are available on disk."""
+        return os.path.isdir(self.skills_path) and bool(self.get_available_skills())
+
     def _load_skill(self, skill_name: str) -> SentinelSkill | None:
-        """Load a Sentinel skill from disk, with caching."""
         if skill_name in self._cache:
             return self._cache[skill_name]
 
@@ -62,16 +112,7 @@ class SentinelTestGenerator:
         self._cache[skill_name] = skill
         return skill
 
-    def _load_context(self, context_name: str) -> str | None:
-        """Load a stack context file if available."""
-        context_file = os.path.join(self.skills_path, "contexts", context_name)
-        if os.path.exists(context_file):
-            with open(context_file) as f:
-                return f.read()
-        return None
-
     def get_available_skills(self) -> list[str]:
-        """List all available Sentinel skills."""
         if not os.path.exists(self.skills_path):
             return []
         return [
@@ -80,45 +121,107 @@ class SentinelTestGenerator:
             and os.path.exists(os.path.join(self.skills_path, d, "SKILL.md"))
         ]
 
-    def build_test_prompt(
+    # ── Stack Detection ──────────────────────────────────────────────────
+
+    def detect_stack(self, worktree_path: str) -> str:
+        """
+        Detect repo stack type by checking for signal files.
+        Returns: "backend", "frontend", or "fullstack"
+        """
+        has_backend = False
+        has_frontend = False
+
+        for signal in BACKEND_SIGNALS:
+            if os.path.exists(os.path.join(worktree_path, signal)):
+                has_backend = True
+                break
+
+        for signal in FRONTEND_SIGNALS:
+            if os.path.exists(os.path.join(worktree_path, signal)):
+                has_frontend = True
+                break
+
+        # Check package.json for frontend deps if not already detected
+        if not has_frontend:
+            pkg_json = os.path.join(worktree_path, "package.json")
+            if os.path.exists(pkg_json):
+                try:
+                    import json
+                    with open(pkg_json) as f:
+                        pkg = json.load(f)
+                    all_deps = set()
+                    all_deps.update((pkg.get("dependencies") or {}).keys())
+                    all_deps.update((pkg.get("devDependencies") or {}).keys())
+                    if all_deps & FRONTEND_DEPS:
+                        has_frontend = True
+                    # A package.json without frontend deps is likely a Node.js backend
+                    if not has_frontend and not has_backend:
+                        has_backend = True
+                except Exception:
+                    pass
+
+        if has_backend and has_frontend:
+            return "fullstack"
+        if has_frontend:
+            return "frontend"
+        if has_backend:
+            return "backend"
+
+        # Default to backend if nothing detected
+        return "backend"
+
+    def get_skill_chain(self, worktree_path: str) -> list[str]:
+        """Get the appropriate skill chain for the repo's stack."""
+        stack = self.detect_stack(worktree_path)
+        if stack == "fullstack":
+            return FULLSTACK_SKILLS
+        if stack == "frontend":
+            return FRONTEND_SKILLS
+        return BACKEND_SKILLS
+
+    # ── Phase Builder ────────────────────────────────────────────────────
+
+    def build_test_phases(
         self,
         context: EnrichedContext,
         worktree_path: str,
         repo_name: str,
-        skill_chain: list[str] | None = None,
-    ) -> str | None:
+    ) -> list[tuple[str, str]]:
         """
-        Build a test-generation prompt by combining Sentinel skills with ticket context.
+        Build sequential per-skill prompts for Claude Code.
 
-        Returns None if no Sentinel skills are available (falls back to inline TDD).
+        Returns list of (skill_name, prompt) tuples.
+        Each tuple is a separate Claude Code invocation.
+        Returns empty list if no skills could be loaded.
         """
-        chain = skill_chain or DEFAULT_SKILL_CHAIN
-        loaded_skills: list[SentinelSkill] = []
+        chain = self.get_skill_chain(worktree_path)
+        available = set(self.get_available_skills())
 
+        phases: list[tuple[str, str]] = []
         for skill_name in chain:
+            if skill_name not in available:
+                continue
             skill = self._load_skill(skill_name)
-            if skill:
-                loaded_skills.append(skill)
+            if not skill:
+                continue
 
-        if not loaded_skills:
-            return None
+            prompt = self._build_phase_prompt(context, skill, worktree_path, repo_name)
+            phases.append((skill_name, prompt))
 
+        return phases
+
+    def _build_ticket_context(self, context: EnrichedContext) -> str:
+        """Build the shared ticket context section (reused across phases)."""
         sections: list[str] = []
 
-        # ── Header ───────────────────────────────────────────────────
-        sections.append(f"# Test Generation for {context.id} — {context.title}")
-        sections.append(f"\nYou are generating tests in the repository at `{worktree_path}` (repo: {repo_name}).")
-        sections.append(f"Your ONLY job is to write test cases. Do NOT implement the fix/feature.")
-
-        # ── Ticket Context ───────────────────────────────────────────
-        sections.append(f"\n## Ticket Context")
+        sections.append("## Ticket Context")
         sections.append(f"**ID:** {context.id}")
         sections.append(f"**Title:** {context.title}")
         sections.append(f"**Priority:** {context.priority}")
         sections.append(f"**Description:**\n{context.description}")
 
         if context.acceptance_criteria:
-            sections.append(f"\n### Acceptance Criteria (EACH must have at least one test)")
+            sections.append("\n### Acceptance Criteria (EACH must have at least one test)")
             for i, ac in enumerate(context.acceptance_criteria, 1):
                 sections.append(f"{i}. {ac}")
 
@@ -129,34 +232,64 @@ class SentinelTestGenerator:
                 sections.append(f"\n**{c.author}** ({date}):\n{c.body}")
 
         if context.file_hints:
-            sections.append(f"\n### Likely Relevant Files")
+            sections.append("\n### Likely Relevant Files")
             for f in context.file_hints:
                 sections.append(f"- `{f}`")
 
-        # ── Sentinel Skills ──────────────────────────────────────────
-        sections.append(f"\n---\n## Testing Instructions")
-        sections.append(f"Follow the Sentinel Guardian testing methodology below.")
+        return "\n".join(sections)
 
-        for skill in loaded_skills:
-            sections.append(f"\n{'='*60}")
-            sections.append(f"## Sentinel Skill: {skill.name}")
-            sections.append(f"{'='*60}")
-            sections.append(skill.content)
+    def _build_phase_prompt(
+        self,
+        context: EnrichedContext,
+        skill: SentinelSkill,
+        worktree_path: str,
+        repo_name: str,
+    ) -> str:
+        """Build prompt for a single Sentinel skill phase."""
+        is_review = skill.name == "test-review"
+        ticket_ctx = self._build_ticket_context(context)
 
-        # ── Final Instructions ───────────────────────────────────────
-        sections.append(f"""
+        sections: list[str] = []
+
+        # ── Header
+        sections.append(f"# Sentinel Phase: {skill.name}")
+        sections.append(f"**Ticket:** {context.id} — {context.title}")
+        sections.append(f"**Repo:** `{repo_name}` at `{worktree_path}`")
+
+        # ── Ticket context
+        sections.append(f"\n{ticket_ctx}")
+
+        # ── Skill instructions
+        sections.append(f"\n---\n## Sentinel Skill: {skill.name}")
+        sections.append(skill.content)
+
+        # ── Phase-specific rules
+        if is_review:
+            sections.append(f"""
 ---
-## CRITICAL RULES FOR THIS PHASE
+## RULES FOR THIS PHASE
 
-1. **ONLY write tests.** Do NOT implement the fix/feature. Do NOT modify any source code.
+1. **Review all test files** written in previous phases.
+2. Follow the test-review skill checklist exactly.
+3. If issues are found, **fix them** in the test files.
+4. **Commit fixes** with message: `test({context.id}): review fixes for {context.title}`
+5. Do NOT implement the fix/feature. Do NOT modify source code.
+6. Do NOT push. Just commit locally.
+""")
+        else:
+            sections.append(f"""
+---
+## RULES FOR THIS PHASE
+
+1. **ONLY write tests** for the `{skill.name}` category. Do NOT implement the fix/feature. Do NOT modify source code.
 2. **Test the behavior described in the ticket** — acceptance criteria, edge cases from comments.
 3. **Follow the repo's existing test conventions** — same framework, same directory structure.
-4. **Tests MUST fail** when you run them (since the fix doesn't exist yet). If they pass, your tests aren't testing the right thing.
-5. **Commit all test files** with message: `test({context.id}): add tests for {context.title}`
+4. **Check what tests already exist** from previous phases. Do NOT duplicate them. Build on top of them.
+5. **Commit all test files** with message: `test({context.id}): add {skill.name} for {context.title}`
 6. Do NOT push. Do NOT create a PR. Just commit locally.
-7. After committing, run the tests to confirm they fail as expected. Print the test output.
+7. After committing, run the tests. Print the output.
 
-**Remember: You are ONLY writing tests. The implementation will be done in a separate phase by another agent.**
+**You are ONLY writing {skill.name}. Implementation happens in a later phase.**
 """)
 
         return "\n".join(sections)
