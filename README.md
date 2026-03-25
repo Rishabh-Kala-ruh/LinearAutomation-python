@@ -170,7 +170,9 @@ linear-automation-python/
 |   |-- core.py                    # Shared core logic
 |   +-- linear_client.py           # Linear GraphQL API client
 |-- skills/
-|   |-- developer_skill.py         # Development intelligence (scope, repo inheritance, prompts)
+|   |-- developer-skill/
+|   |   +-- SKILL.md               # TDD instructions, quality checklist, critical rules
+|   |-- developer_skill.py         # Scope resolution, repo inheritance, dynamic prompt assembly
 |   |-- sentinel_integration.py    # Sentinel Guardian test generation integration
 |   +-- ticket_enricher.py         # Deep context extraction from Linear/Jira
 |-- openclaw-skill/

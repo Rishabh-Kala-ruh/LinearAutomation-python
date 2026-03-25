@@ -73,6 +73,34 @@ class RepoEntry:
 # ── Developer Skill ──────────────────────────────────────────────────────────
 
 
+# ── Skill file loading ───────────────────────────────────────────────────────
+
+_SKILL_DIR = os.path.join(os.path.dirname(__file__), "developer-skill")
+_SKILL_CACHE: str | None = None
+
+
+def _load_skill_md() -> str:
+    """Load the developer SKILL.md instructions. Cached after first read."""
+    global _SKILL_CACHE
+    if _SKILL_CACHE is not None:
+        return _SKILL_CACHE
+
+    skill_file = os.path.join(_SKILL_DIR, "SKILL.md")
+    if os.path.exists(skill_file):
+        with open(skill_file) as f:
+            content = f.read()
+        # Strip YAML frontmatter
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                content = content[end + 3:].strip()
+        _SKILL_CACHE = content
+    else:
+        _SKILL_CACHE = ""
+
+    return _SKILL_CACHE
+
+
 class DeveloperSkill:
     def __init__(
         self, api_key: str, viewer_id: str,
@@ -380,10 +408,10 @@ class DeveloperSkill:
             for a in context.attachments:
                 sections.append(f"- {a.title}: {a.url}")
 
-        # ── Instructions ─────────────────────────────────────────────
+        # ── Instructions (loaded from SKILL.md) ─────────────────────
         sections.append("\n---\n## Instructions")
 
-        # Scope-specific instructions
+        # Scope-specific instructions (dynamic, stays in Python)
         if scope_type == "subtask":
             sections.append(f"""
 **IMPORTANT: You are working on sub-task {context.id} ONLY.**
@@ -399,51 +427,22 @@ Those are assigned to other developers. Only implement what is NOT covered by an
 plus any sub-tasks that are assigned to you.
 """)
 
-        sections.append(f"""You MUST follow **Test-Driven Development (TDD)**. Tests are the contract — code adapts to pass them.
+        # Load static instructions from SKILL.md and inject ticket ID
+        skill_instructions = _load_skill_md()
+        if skill_instructions:
+            sections.append(skill_instructions.replace("{{TICKET_ID}}", context.id))
+        else:
+            # Fallback if SKILL.md is missing
+            sections.append(f"""1. Read and analyze the codebase.
+2. Implement the fix or feature described in the ticket.
+3. Stage and commit with: `fix({context.id}): <short summary>`
+4. Do NOT push. Do NOT create a PR. Just commit locally.
+5. If you cannot fix the issue, create `CLAUDE_UNABLE.md` explaining why.""")
 
-### Phase 1: UNDERSTAND (do not write code yet)
-1. **Read and analyze** the codebase — start with the files/symbols mentioned above.
-2. **Understand the full context** — the description, acceptance criteria, AND the discussion thread all matter.
-3. **Identify the testing framework** already used in this repo (e.g., pytest, jest, mocha, go test, etc.). Use the same framework and conventions.
-
-### Phase 2: WRITE TESTS FIRST
-4. **Write test cases** that define the expected behavior for this ticket:
-   - Cover the main fix/feature described in the ticket
-   - Cover each acceptance criterion as at least one test
-   - Cover edge cases mentioned in comments
-   - Place tests in the appropriate test directory following the repo's existing test structure
-5. **Commit the tests** with message: `test({context.id}): add tests for <short summary>`
-6. **Run the tests** — they MUST fail at this point (since the implementation doesn't exist yet). If they pass, your tests aren't testing the right thing — fix them.
-
-### Phase 3: IMPLEMENT (make tests pass)
-7. **Implement the fix or feature** described in the ticket. Follow existing code style.
-8. **Run the tests again** after implementation.
-9. **If tests fail**: fix your IMPLEMENTATION code, NOT the tests. Repeat until all tests pass.
-10. **Commit the implementation** with message: `fix({context.id}): <short summary of what was changed>`
-
-### Phase 4: VERIFY
-11. **Run the full test suite** (not just your new tests) to ensure no regressions.
-12. If existing tests break, fix the implementation — do NOT modify existing tests unless they are genuinely testing wrong behavior.
-
-## CRITICAL RULES
-- **NEVER edit or delete test files after Phase 2.** Tests are the source of truth. If your code doesn't pass, fix the code.
-- **NEVER weaken a test** to make it pass (e.g., removing assertions, loosening checks, catching exceptions in tests).
-- **NEVER skip or disable tests** (no `@pytest.mark.skip`, no `.skip()`, no `xit()`).
-- Do NOT push. Do NOT create a PR. Just commit locally.
-- If you cannot fix the issue, create `CLAUDE_UNABLE.md` explaining exactly why.
-
-### Quality Checklist
-- [ ] Tests written BEFORE implementation
-- [ ] Tests committed separately from implementation
-- [ ] All new tests pass
-- [ ] All existing tests still pass (no regressions)
-- [ ] All acceptance criteria have corresponding tests
-- [ ] Edge cases from comments are tested
-- [ ] Code follows existing patterns and style
-- [ ] Changes are minimal and focused — don't refactor unrelated code
-- [ ] Test files were NOT modified after initial test commit
-{f'- [ ] Only sub-task {context.id} scope is implemented (no parent scope leakage)' if scope_type == "subtask" else ''}
-{f'- [ ] Other developers sub-tasks are NOT touched' if scope_type == "parent_with_subtasks" and any(not s.is_mine for s in sub_tasks) else ''}
-**Important: You should have exactly 2 commits — one for tests, one for implementation.**""")
+        # Dynamic checklist additions based on scope
+        if scope_type == "subtask":
+            sections.append(f"- [ ] Only sub-task {context.id} scope is implemented (no parent scope leakage)")
+        if scope_type == "parent_with_subtasks" and any(not s.is_mine for s in sub_tasks):
+            sections.append("- [ ] Other developers sub-tasks are NOT touched")
 
         return "\n".join(sections)
