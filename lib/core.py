@@ -397,18 +397,23 @@ def push_and_create_pr(
 
 # ── Linear Updates ───────────────────────────────────────────────────────────
 
-def transition_issue(issue: dict[str, Any], state_type: str) -> None:
+def transition_issue(issue: dict[str, Any], state_type: str, state_name: str | None = None) -> None:
+    """Transition issue to a target state. Matches by name first (if provided), then by type."""
     try:
         team_id = (issue.get("team") or {}).get("id") or linear.get_issue_team_id(issue["id"])
         if not team_id:
             return
         states = linear.get_team_states(team_id)
-        target_state = next((s for s in states if s["type"] == state_type), None)
+        target_state = None
+        if state_name:
+            target_state = next((s for s in states if s["name"].lower() == state_name.lower()), None)
+        if not target_state:
+            target_state = next((s for s in states if s["type"] == state_type), None)
         if target_state:
             linear.update_issue(issue["id"], target_state["id"])
             log(f'Moved {issue["identifier"]} to "{target_state["name"]}"')
         else:
-            log(f'No state of type "{state_type}" found for team')
+            log(f'No state matching name="{state_name}" or type="{state_type}" found for team')
     except Exception as err:
         log(f'Failed to transition {issue["identifier"]}: {err}')
 
@@ -464,7 +469,7 @@ def _process_single_issue(issue: dict[str, Any], team_key: str) -> None:
                 log(f"  [{identifier}] Error on repo {entry.name}: {err}")
 
         if pr_urls:
-            transition_issue(issue, "completed")
+            transition_issue(issue, "started", state_name="Code Review")
             pr_list = "\n".join(f"- {url}" for url in pr_urls)
             comment_on_issue(
                 issue["id"],
