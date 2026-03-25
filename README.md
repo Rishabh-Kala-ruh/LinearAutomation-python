@@ -66,16 +66,27 @@ For each ticket (in parallel):
 #### 1. Move Ticket to "In Progress"
 The Linear issue state is transitioned to `started`.
 
-#### 2. Enrich Ticket Context
-The **Ticket Enricher** (`skills/ticket_enricher.py`) extracts deep context with **all 7 API calls fired in parallel**:
+#### 2. Developer Skill — Scope Resolution & Context Enrichment
 
-- Full description + all comments (team discussion)
-- Sub-issues / child tasks
-- Parent issue context (bigger picture)
-- Related/blocking tickets
-- Labels, priority, attachments
-- Acceptance criteria (parsed from description)
-- File hints (file paths and code references from description + comments)
+The **Developer Skill** (`skills/developer_skill.py`) is the intelligence layer that handles all ticket cases:
+
+| Case | What Happens |
+|------|-------------|
+| **Normal ticket** (no sub-tasks) | Fix everything in the ticket |
+| **Parent ticket** with sub-tasks on other devs | Fix only what's NOT covered by those sub-tasks |
+| **Sub-task** assigned to you | Fix only the sub-task scope, inherit repo from parent |
+| **Parent + some sub-tasks** assigned to you | Fix parent scope + your sub-tasks, skip others' |
+
+The skill:
+1. **Resolves scope** — detects if it's a normal ticket, parent, or sub-task
+2. **Inherits repo info** — sub-tasks without `repo:` labels inherit from parent
+3. **Builds scope-aware prompt** — tells Claude exactly what to implement and what NOT to touch
+4. **Enriches context** via the Ticket Enricher (7 API calls fired in parallel):
+   - Full description + all comments
+   - Sub-issues with assignee info (for scope exclusion)
+   - Parent issue context (for sub-task inheritance)
+   - Related/blocking tickets, labels, priority, attachments
+   - Acceptance criteria and file hints (from ticket + parent)
 
 #### 3. Create Worktree
 An isolated git worktree is created at `.worktrees/claude/<ticket-id>` based on `origin/dev`. Per-repo locks prevent concurrent git operations on the same repo.
@@ -157,6 +168,7 @@ linear-automation-python/
 |   |-- core.py                    # 3-phase processing engine
 |   +-- linear_client.py           # Linear GraphQL API client
 |-- skills/
+|   |-- developer_skill.py         # Development intelligence (scope, repo inheritance, prompts)
 |   +-- ticket_enricher.py         # Deep context extraction from Linear/Jira
 |-- openclaw-skill/
 |   +-- SKILL.md                   # OpenClaw skill definition

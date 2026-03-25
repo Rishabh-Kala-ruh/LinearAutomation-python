@@ -26,6 +26,7 @@ from lib.config import (
 )
 from lib.linear_client import LinearClient
 from skills.ticket_enricher import LinearEnricher, EnrichedContext, build_enriched_prompt
+from skills.developer_skill import DeveloperSkill, DeveloperResult
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -40,6 +41,8 @@ class RepoEntry:
 
 linear = LinearClient(LINEAR_API_KEY)
 enricher = LinearEnricher(LINEAR_API_KEY)
+# Developer skill is initialized after we know the viewer_id (in process_tickets)
+dev_skill: DeveloperSkill | None = None
 
 os.makedirs(LOGS_DIR, exist_ok=True)
 
@@ -230,33 +233,31 @@ def cleanup_worktree(repo_path: str, worktree_path: str) -> None:
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
-def run_claude_code(worktree_path: str, issue: dict[str, Any], repo_name: str) -> bool:
+def run_claude_code(
+    worktree_path: str, issue: dict[str, Any], repo_name: str, team_key: str
+) -> bool:
     identifier = issue["identifier"]
-    log(f"Enriching ticket {identifier} with deep context...")
 
-    try:
-        enriched_context = enricher.enrich(issue)
-        log(
-            f"Enriched: {len(enriched_context.comments)} comments, "
-            f"{len(enriched_context.sub_issues)} sub-issues, "
-            f"{len(enriched_context.relations)} relations, "
-            f"{len(enriched_context.file_hints)} file hints"
-        )
-    except Exception as err:
-        log(f"Enrichment failed, falling back to basic context: {err}")
-        enriched_context = EnrichedContext(
-            source="linear",
-            id=identifier,
-            title=issue["title"],
-            description=issue.get("description") or "No description.",
-            url=issue["url"],
-            priority="Unknown",
-            status="Unknown",
-            created_at=issue.get("createdAt", ""),
-            updated_at=issue.get("updatedAt", ""),
-        )
+    # Use developer skill for scope-aware prompt building
+    if dev_skill:
+        log(f"Developer Skill processing {identifier}...")
+        try:
+            result = dev_skill.process(issue, team_key, worktree_path, repo_name)
+            prompt = result.prompt
+            ctx = result.enriched_context
+            log(
+                f"Scope: {result.scope_type} | "
+                f"Enriched: {len(ctx.comments)} comments, "
+                f"{len(ctx.sub_issues)} sub-issues, "
+                f"{len(ctx.relations)} relations, "
+                f"{len(ctx.file_hints)} file hints"
+            )
+        except Exception as err:
+            log(f"Developer Skill failed, falling back to basic enrichment: {err}")
+            prompt = _fallback_prompt(issue, worktree_path, repo_name)
+    else:
+        prompt = _fallback_prompt(issue, worktree_path, repo_name)
 
-    prompt = build_enriched_prompt(enriched_context, worktree_path, repo_name)
     prompt_file = os.path.join(LOGS_DIR, f"prompt_{identifier}.txt")
     log_file = os.path.join(LOGS_DIR, f"claude_{identifier}.log")
 
@@ -282,6 +283,25 @@ def run_claude_code(worktree_path: str, issue: dict[str, Any], repo_name: str) -
         with open(log_file, "w") as f:
             f.write(f"ERROR: {err}\n{stdout}")
         return False
+
+
+def _fallback_prompt(issue: dict[str, Any], worktree_path: str, repo_name: str) -> str:
+    """Fallback when developer skill is unavailable."""
+    try:
+        enriched_context = enricher.enrich(issue)
+    except Exception:
+        enriched_context = EnrichedContext(
+            source="linear",
+            id=issue["identifier"],
+            title=issue["title"],
+            description=issue.get("description") or "No description.",
+            url=issue["url"],
+            priority="Unknown",
+            status="Unknown",
+            created_at=issue.get("createdAt", ""),
+            updated_at=issue.get("updatedAt", ""),
+        )
+    return build_enriched_prompt(enriched_context, worktree_path, repo_name)
 
 
 # ── PR Creation ──────────────────────────────────────────────────────────────
@@ -403,7 +423,7 @@ def _process_single_issue(issue: dict[str, Any], team_key: str) -> None:
 
                 # Claude Code and PR creation run outside the repo lock
                 # (worktrees are fully isolated)
-                success = run_claude_code(worktree_path, issue, entry.name)
+                success = run_claude_code(worktree_path, issue, entry.name, team_key)
 
                 if success:
                     pr_url = push_and_create_pr(worktree_path, entry.name, branch_name, issue)
@@ -434,11 +454,15 @@ def _process_single_issue(issue: dict[str, Any], team_key: str) -> None:
 # ── Main Processing Loop (3-phase) ──────────────────────────────────────────
 
 def process_tickets() -> None:
+    global dev_skill
     log("=== Starting ticket scan ===")
     log(f"Max concurrent tickets: {MAX_CONCURRENT_TICKETS}")
     try:
         me = linear.get_viewer()
         log(f'Authenticated as: {me["name"]} ({me["email"]})')
+
+        # Initialize developer skill with viewer ID for scope resolution
+        dev_skill = DeveloperSkill(LINEAR_API_KEY, me["id"], GITHUB_ORG)
 
         teams = linear.get_teams()
 

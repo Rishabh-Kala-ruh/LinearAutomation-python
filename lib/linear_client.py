@@ -203,6 +203,29 @@ class LinearClient:
         data = self._gql(query, {"id": issue_id, "first": first})
         return data["issue"]["children"]["nodes"]
 
+    def get_issue_children_with_assignees(self, issue_id: str, first: int = 20) -> list[dict[str, Any]]:
+        """Fetch children with assignee info — used by developer skill for scope resolution."""
+        query = """
+        query($id: String!, $first: Int!) {
+          issue(id: $id) {
+            children(first: $first) {
+              nodes {
+                id
+                identifier
+                title
+                description
+                priority
+                state { name }
+                assignee { id name }
+                labels { nodes { name } }
+              }
+            }
+          }
+        }
+        """
+        data = self._gql(query, {"id": issue_id, "first": first})
+        return data["issue"]["children"]["nodes"]
+
     # ── parent ───────────────────────────────────────────────────────
 
     def get_issue_parent(self, issue_id: str) -> dict[str, Any] | None:
@@ -213,6 +236,28 @@ class LinearClient:
               identifier
               title
               description
+            }
+          }
+        }
+        """
+        data = self._gql(query, {"id": issue_id})
+        return data["issue"].get("parent")
+
+    def get_issue_parent_full(self, issue_id: str) -> dict[str, Any] | None:
+        """Fetch parent with labels, project, description — used by developer skill for repo inheritance."""
+        query = """
+        query($id: String!) {
+          issue(id: $id) {
+            parent {
+              id
+              identifier
+              title
+              description
+              url
+              priority
+              labels { nodes { name } }
+              project { name }
+              team { id }
             }
           }
         }
