@@ -107,13 +107,21 @@ claude -p "$(cat prompt.txt)" \
 - **15 minute timeout** per ticket
 - **Auth**: Claude Pro subscription via OAuth token
 
-Claude Code follows **Test-Driven Development (TDD)**:
+Claude Code follows **Test-Driven Development (TDD)** in two phases:
 
-1. **Understand** — reads the codebase and understands the structure
-2. **Write tests first** — creates test cases based on acceptance criteria, edge cases from comments, and the ticket description. Commits tests separately.
-3. **Verify tests fail** — confirms the tests fail before implementation (proving they test the right thing)
-4. **Implement** — writes the fix/feature to make all tests pass
-5. **Never edit tests** — if tests fail after implementation, the code is fixed, NOT the tests. Tests are the contract.
+**Phase 1 — Sentinel Test Generation** (if Sentinel Guardian is available):
+- Loads Sentinel Guardian testing skills (`test-setup`, `unit-tests`)
+- Generates comprehensive test cases based on acceptance criteria, edge cases, and the ticket description
+- Commits tests separately: `test(TICKET-ID): add tests for ...`
+- Verifies tests FAIL (since the fix doesn't exist yet)
+
+**Phase 2 — Implementation**:
+- Reads the codebase and the tests from Phase 1
+- Implements the fix/feature to make all tests pass
+- **Never edits test files** — if tests fail, the code is fixed, NOT the tests
+- Commits implementation: `fix(TICKET-ID): ...`
+
+If Sentinel is not available, falls back to single-phase TDD where Claude writes both tests and implementation.
 3. Writes/edits code to fix the issue
 4. Stages all changes
 5. Commits with message: `fix(TICKET-ID): short summary`
@@ -173,6 +181,7 @@ linear-automation-python/
 |   +-- linear_client.py           # Linear GraphQL API client
 |-- skills/
 |   |-- developer_skill.py         # Development intelligence (scope, repo inheritance, prompts)
+|   |-- sentinel_integration.py    # Sentinel Guardian test generation integration
 |   +-- ticket_enricher.py         # Deep context extraction from Linear/Jira
 |-- openclaw-skill/
 |   +-- SKILL.md                   # OpenClaw skill definition

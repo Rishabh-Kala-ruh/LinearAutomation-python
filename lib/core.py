@@ -22,7 +22,7 @@ from typing import Any
 from lib.config import (
     LINEAR_API_KEY, GITHUB_ORG, TARGET_BRANCH, LOGS_DIR,
     CLAUDE_CMD, REPOS_DIR, REPO_MAP, PROCESSING_LABEL, DONE_LABEL,
-    MAX_CONCURRENT_TICKETS,
+    MAX_CONCURRENT_TICKETS, SENTINEL_SKILLS_PATH,
 )
 from lib.linear_client import LinearClient
 from skills.ticket_enricher import LinearEnricher, EnrichedContext, build_enriched_prompt
@@ -233,38 +233,9 @@ def cleanup_worktree(repo_path: str, worktree_path: str) -> None:
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
-def run_claude_code(
-    worktree_path: str, issue: dict[str, Any], repo_name: str, team_key: str
-) -> bool:
-    identifier = issue["identifier"]
-
-    # Use developer skill for scope-aware prompt building
-    if dev_skill:
-        log(f"Developer Skill processing {identifier}...")
-        try:
-            result = dev_skill.process(issue, team_key, worktree_path, repo_name)
-            prompt = result.prompt
-            ctx = result.enriched_context
-            log(
-                f"Scope: {result.scope_type} | "
-                f"Enriched: {len(ctx.comments)} comments, "
-                f"{len(ctx.sub_issues)} sub-issues, "
-                f"{len(ctx.relations)} relations, "
-                f"{len(ctx.file_hints)} file hints"
-            )
-        except Exception as err:
-            log(f"Developer Skill failed, falling back to basic enrichment: {err}")
-            prompt = _fallback_prompt(issue, worktree_path, repo_name)
-    else:
-        prompt = _fallback_prompt(issue, worktree_path, repo_name)
-
-    prompt_file = os.path.join(LOGS_DIR, f"prompt_{identifier}.txt")
-    log_file = os.path.join(LOGS_DIR, f"claude_{identifier}.log")
-
-    with open(prompt_file, "w") as f:
-        f.write(prompt)
-
-    log(f"Running Claude Code ({CLAUDE_CMD}) for {identifier} in {worktree_path}...")
+def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path: str, phase: str) -> bool:
+    """Execute a single Claude Code invocation."""
+    log(f"Running Claude Code ({CLAUDE_CMD}) — {phase} for {identifier}...")
     try:
         output = shell(
             f"""{CLAUDE_CMD} -p "$(cat '{prompt_file}')" """
@@ -273,16 +244,74 @@ def run_claude_code(
             cwd=worktree_path,
             timeout=900,
         )
-        with open(log_file, "w") as f:
-            f.write(output)
-        log(f"Claude Code finished for {identifier}")
+        with open(log_file, "a") as f:
+            f.write(f"\n{'='*60}\n{phase}\n{'='*60}\n{output}\n")
+        log(f"Claude Code {phase} finished for {identifier}")
         return True
     except subprocess.CalledProcessError as err:
-        log(f"Claude Code failed for {identifier}: {err}")
+        log(f"Claude Code {phase} failed for {identifier}: {err}")
         stdout = err.output or ""
-        with open(log_file, "w") as f:
-            f.write(f"ERROR: {err}\n{stdout}")
+        with open(log_file, "a") as f:
+            f.write(f"\n{'='*60}\n{phase} — ERROR\n{'='*60}\n{err}\n{stdout}\n")
         return False
+
+
+def run_claude_code(
+    worktree_path: str, issue: dict[str, Any], repo_name: str, team_key: str
+) -> bool:
+    identifier = issue["identifier"]
+    log_file = os.path.join(LOGS_DIR, f"claude_{identifier}.log")
+
+    # Clear log file for fresh run
+    with open(log_file, "w") as f:
+        f.write(f"# Claude Code log for {identifier}\n")
+
+    # Use developer skill for scope-aware prompt building
+    test_prompt: str | None = None
+    impl_prompt: str
+
+    if dev_skill:
+        log(f"Developer Skill processing {identifier}...")
+        try:
+            result = dev_skill.process(issue, team_key, worktree_path, repo_name)
+            test_prompt = result.test_prompt
+            impl_prompt = result.impl_prompt
+            ctx = result.enriched_context
+            log(
+                f"Scope: {result.scope_type} | "
+                f"Sentinel: {'enabled' if test_prompt else 'disabled'} | "
+                f"Enriched: {len(ctx.comments)} comments, "
+                f"{len(ctx.sub_issues)} sub-issues, "
+                f"{len(ctx.relations)} relations, "
+                f"{len(ctx.file_hints)} file hints"
+            )
+        except Exception as err:
+            log(f"Developer Skill failed, falling back to basic enrichment: {err}")
+            impl_prompt = _fallback_prompt(issue, worktree_path, repo_name)
+    else:
+        impl_prompt = _fallback_prompt(issue, worktree_path, repo_name)
+
+    # ── Phase 1: Sentinel Test Generation ─────────────────────────────
+    if test_prompt:
+        test_prompt_file = os.path.join(LOGS_DIR, f"prompt_test_{identifier}.txt")
+        with open(test_prompt_file, "w") as f:
+            f.write(test_prompt)
+
+        phase1_ok = _run_claude(identifier, test_prompt_file, log_file, worktree_path, "Phase 1: Test Generation")
+        if not phase1_ok:
+            log(f"Phase 1 (test generation) failed for {identifier} — skipping implementation")
+            return False
+
+        log(f"Phase 1 complete for {identifier} — tests committed. Starting Phase 2...")
+    else:
+        log(f"Sentinel not available — running single-phase TDD for {identifier}")
+
+    # ── Phase 2: Implementation ───────────────────────────────────────
+    impl_prompt_file = os.path.join(LOGS_DIR, f"prompt_impl_{identifier}.txt")
+    with open(impl_prompt_file, "w") as f:
+        f.write(impl_prompt)
+
+    return _run_claude(identifier, impl_prompt_file, log_file, worktree_path, "Phase 2: Implementation")
 
 
 def _fallback_prompt(issue: dict[str, Any], worktree_path: str, repo_name: str) -> str:
@@ -461,8 +490,13 @@ def process_tickets() -> None:
         me = linear.get_viewer()
         log(f'Authenticated as: {me["name"]} ({me["email"]})')
 
-        # Initialize developer skill with viewer ID for scope resolution
-        dev_skill = DeveloperSkill(LINEAR_API_KEY, me["id"], GITHUB_ORG)
+        # Initialize developer skill with viewer ID and Sentinel path
+        dev_skill = DeveloperSkill(
+            LINEAR_API_KEY, me["id"], GITHUB_ORG,
+            sentinel_skills_path=SENTINEL_SKILLS_PATH,
+        )
+        sentinel_status = "enabled" if dev_skill.sentinel else "disabled (path not found)"
+        log(f"Sentinel Guardian: {sentinel_status}")
 
         teams = linear.get_teams()
 
