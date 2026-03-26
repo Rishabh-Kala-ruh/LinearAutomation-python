@@ -279,9 +279,11 @@ def run_claude_code(
         return False
 
     ctx = result.enriched_context
+    pf = result.pathfinder
+    pf_info = f"Pathfinder: {pf.classification}/{pf.complexity}, repos={pf.repos}" if pf else "Pathfinder: not found"
     log(
         f"Scope: {result.scope_type} | Stack: {result.stack_type} | "
-        f"Test phases: {len(result.test_phases)} | "
+        f"Test phases: {len(result.test_phases)} | {pf_info} | "
         f"Enriched: {len(ctx.comments)} comments, "
         f"{len(ctx.sub_issues)} sub-issues, "
         f"{len(ctx.relations)} relations, "

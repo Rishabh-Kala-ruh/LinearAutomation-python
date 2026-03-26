@@ -37,11 +37,23 @@ Automatically picks up Linear tickets assigned to you, uses **Claude Code AI** t
 The script connects to the Linear GraphQL API with a **single batch query** that fetches issues with labels and project inline (fewer API calls). It filters:
 
 - **Assignee = you** (only your tickets)
-- **Status = "unstarted" or "started"** (Todo / In Progress)
+- **Status = "Ready for Development"** (set by Pathfinder after analysis), with fallback to "unstarted"/"started"
 - Skips tickets already processed (tracked in `processed_issues.json`)
 - Skips tickets with labels `claude-processing` or `claude-done`
 
 Then **sorts by priority**: Urgent → High → Medium → Low → None. Urgent tickets always get processed first.
+
+### Pathfinder Integration
+
+Before our automation picks up a ticket, another automation (**Pathfinder**) analyzes it and adds a structured comment:
+
+| Ticket Type | Pathfinder Adds | Contains |
+|-------------|----------------|----------|
+| **Bug** | RCA (Root Cause Analysis) | Symptom → Root Cause → Exact file/line trace → Fix Approach → Code Changes table |
+| **Feature** | TRD (Technical Requirements Document) | Requirements → Technical Design → Code Changes table → Implementation Order |
+| **Task** | Task Breakdown | What needs to be done → Affected files |
+
+Pathfinder then moves the ticket to **"Ready for Development"** — that's when our automation picks it up.
 
 ### Phase 2: PREPARE — Clone Repos in Parallel
 
@@ -49,11 +61,11 @@ Each ticket is mapped to one or more GitHub repos using this priority:
 
 | Priority | Source | Example |
 |----------|--------|---------|
-| 1 | `repo:` label on ticket | `repo:my-backend` |
-| 2 | GitHub URL in description | `https://github.com/org/repo` |
-| 3 | `Repository: name` in description | `Repository: my-backend` |
-| 4 | Linear project name | Project "frontend" |
-| 5 | Team key (fallback) | Team "ENG" |
+| 1 | **Pathfinder "Repos Affected"** (from analysis comment) | `agent-platform-v2 (primary), ai-gateway` |
+| 2 | `repo:` label on ticket | `repo:my-backend` |
+| 3 | GitHub URL in description | `https://github.com/org/repo` |
+| 4 | Parent ticket (for sub-tasks) | Inherited from parent |
+| 5 | Linear project name / team key (fallback) | Project "frontend" |
 
 All **unique repos are cloned/updated in parallel** (up to 4 at once). Each repo is only fetched once even if multiple tickets target it.
 
@@ -189,6 +201,7 @@ linear-automation-python/
 |   |   +-- SKILL.md               # TDD instructions, quality checklist, critical rules
 |   |-- developer_skill.py         # Scope resolution, repo inheritance, dynamic prompt assembly
 |   |-- sentinel_integration.py    # Sentinel Guardian test generation integration
+|   |-- pathfinder_parser.py       # Parses Pathfinder RCA/TRD comments from Linear
 |   +-- ticket_enricher.py         # Deep context extraction from Linear/Jira
 |-- openclaw-skill/
 |   +-- SKILL.md                   # OpenClaw skill definition
