@@ -232,16 +232,28 @@ def cleanup_worktree(repo_path: str, worktree_path: str) -> None:
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
 def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path: str, phase: str) -> bool:
-    """Execute a single Claude Code invocation."""
+    """Execute a single Claude Code invocation. Pipes prompt via stdin to avoid shell arg length limits."""
     log(f"Running Claude Code ({CLAUDE_CMD}) — {phase} for {identifier}...")
     try:
-        output = shell(
-            f"""{CLAUDE_CMD} -p "$(cat '{prompt_file}')" """
-            f"""--allowedTools "Bash" "Read" "Edit" "Write" "Glob" "Grep" """
-            f"""--max-turns 30 --output-format text""",
-            cwd=worktree_path,
-            timeout=900,
+        with open(prompt_file) as f:
+            prompt_content = f.read()
+
+        env = {**os.environ, "PATH": f"{EXTRA_PATHS}:{os.environ.get('PATH', '')}"}
+        result = subprocess.run(
+            [
+                CLAUDE_CMD, "-p", prompt_content,
+                "--allowedTools", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
+                "--max-turns", "30",
+                "--output-format", "text",
+            ],
+            capture_output=True, text=True,
+            cwd=worktree_path, timeout=900, env=env,
         )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, CLAUDE_CMD, output=result.stdout, stderr=result.stderr,
+            )
+        output = result.stdout.strip()
         with open(log_file, "a") as f:
             f.write(f"\n{'='*60}\n{phase}\n{'='*60}\n{output}\n")
         log(f"Claude Code {phase} finished for {identifier}")
@@ -249,8 +261,9 @@ def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path:
     except subprocess.CalledProcessError as err:
         log(f"Claude Code {phase} failed for {identifier}: {err}")
         stdout = err.output or ""
+        stderr = err.stderr or ""
         with open(log_file, "a") as f:
-            f.write(f"\n{'='*60}\n{phase} — ERROR\n{'='*60}\n{err}\n{stdout}\n")
+            f.write(f"\n{'='*60}\n{phase} — ERROR\n{'='*60}\n{err}\nSTDOUT: {stdout}\nSTDERR: {stderr}\n")
         return False
 
 
