@@ -60,8 +60,8 @@ class DeveloperResult:
     title: str
     scope_type: str  # "normal" | "parent_with_subtasks" | "subtask"
     repos: list[RepoEntry]
-    test_phases: list[tuple[str, str]]  # Sequential Sentinel phases: [(skill_name, prompt), ...]
-    impl_prompt: str                     # Final phase: implementation
+    test_prompt: str   # Test Agent prompt (single session, all Sentinel skills)
+    impl_prompt: str   # Dev Agent prompt (single session, implementation)
     enriched_context: EnrichedContext
     stack_type: str = "backend"          # "backend" | "frontend" | "fullstack"
     pathfinder: PathfinderAnalysis | None = None  # Parsed Pathfinder analysis (if found)
@@ -102,6 +102,31 @@ def _load_skill_md() -> str:
         _SKILL_CACHE = ""
 
     return _SKILL_CACHE
+
+
+_DEV_AGENT_DIR = os.path.join(os.path.dirname(__file__), "agents")
+_DEV_AGENT_CACHE: str | None = None
+
+
+def _load_dev_agent_md() -> str:
+    """Load the dev-agent.md instructions. Cached after first read."""
+    global _DEV_AGENT_CACHE
+    if _DEV_AGENT_CACHE is not None:
+        return _DEV_AGENT_CACHE
+
+    agent_file = os.path.join(_DEV_AGENT_DIR, "dev-agent.md")
+    if os.path.exists(agent_file):
+        with open(agent_file) as f:
+            content = f.read()
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                content = content[end + 3:].strip()
+        _DEV_AGENT_CACHE = content
+    else:
+        _DEV_AGENT_CACHE = ""
+
+    return _DEV_AGENT_CACHE
 
 
 class DeveloperSkill:
@@ -167,17 +192,17 @@ class DeveloperSkill:
             issue, labels, team_key, project_name, parent_info, pathfinder
         )
 
-        # Step 5: Detect stack and build sequential Sentinel test phases
+        # Step 5: Detect stack and build Test Agent prompt (single session, all skills)
         stack_type = self.sentinel.detect_stack(worktree_path)
-        test_phases = self.sentinel.build_test_phases(enriched, worktree_path, repo_name)
+        test_prompt = self.sentinel.build_single_test_prompt(enriched, worktree_path, repo_name)
 
-        if not test_phases:
+        if not test_prompt:
             raise RuntimeError(
                 f"No Sentinel test skills could be loaded for stack '{stack_type}'. "
                 "Check that SKILL.md files exist in the Sentinel skills directory."
             )
 
-        # Step 6: Build final implementation prompt (with Pathfinder context)
+        # Step 6: Build Dev Agent prompt (with Pathfinder context)
         impl_prompt = self._build_prompt(
             enriched, scope_type, parent_info, sub_tasks,
             worktree_path, repo_name, pathfinder,
@@ -188,7 +213,7 @@ class DeveloperSkill:
             title=issue["title"],
             scope_type=scope_type,
             repos=repos,
-            test_phases=test_phases,
+            test_prompt=test_prompt,
             impl_prompt=impl_prompt,
             enriched_context=enriched,
             stack_type=stack_type,
@@ -337,8 +362,14 @@ class DeveloperSkill:
         repo_name: str,
         pathfinder: PathfinderAnalysis | None = None,
     ) -> str:
-        """Build a scope-aware prompt for Claude Code."""
+        """Build a scope-aware prompt for Claude Code (Dev Agent)."""
         sections: list[str] = []
+
+        # Load Dev Agent definition
+        dev_agent_md = _load_dev_agent_md()
+        if dev_agent_md:
+            sections.append(dev_agent_md)
+            sections.append("")
 
         source_label = "Jira" if context.source == "jira" else "Linear"
 

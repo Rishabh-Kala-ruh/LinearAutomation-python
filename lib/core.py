@@ -282,36 +282,32 @@ def run_claude_code(
     pf = result.pathfinder
     pf_info = f"Pathfinder: {pf.classification}/{pf.complexity}, repos={pf.repos}" if pf else "Pathfinder: not found"
     log(
-        f"Scope: {result.scope_type} | Stack: {result.stack_type} | "
-        f"Test phases: {len(result.test_phases)} | {pf_info} | "
+        f"Scope: {result.scope_type} | Stack: {result.stack_type} | {pf_info} | "
         f"Enriched: {len(ctx.comments)} comments, "
         f"{len(ctx.sub_issues)} sub-issues, "
         f"{len(ctx.relations)} relations, "
         f"{len(ctx.file_hints)} file hints"
     )
 
-    # ── Sentinel Test Phases (sequential) ─────────────────────────────
-    total_phases = len(result.test_phases)
-    for i, (skill_name, prompt) in enumerate(result.test_phases, 1):
-        phase_label = f"Phase {i}/{total_phases}: {skill_name}"
-        prompt_file = os.path.join(LOGS_DIR, f"prompt_{skill_name}_{identifier}.txt")
-        with open(prompt_file, "w") as f:
-            f.write(prompt)
+    # ── Agent 1: Test Agent ───────────────────────────────────────────
+    log(f"[{identifier}] Starting Test Agent...")
+    test_prompt_file = os.path.join(LOGS_DIR, f"prompt_test_{identifier}.txt")
+    with open(test_prompt_file, "w") as f:
+        f.write(result.test_prompt)
 
-        log(f"[{identifier}] Starting {phase_label}...")
-        ok = _run_claude(identifier, prompt_file, log_file, worktree_path, phase_label)
-        if not ok:
-            log(f"[{identifier}] {phase_label} failed — stopping test generation")
-            return False
-        log(f"[{identifier}] {phase_label} complete.")
+    test_ok = _run_claude(identifier, test_prompt_file, log_file, worktree_path, "Test Agent")
+    if not test_ok:
+        log(f"[{identifier}] Test Agent failed — skipping implementation")
+        return False
+    log(f"[{identifier}] Test Agent complete — tests committed.")
 
-    # ── Final Phase: Implementation ───────────────────────────────────
-    log(f"[{identifier}] All test phases complete. Starting implementation...")
+    # ── Agent 2: Dev Agent ────────────────────────────────────────────
+    log(f"[{identifier}] Starting Dev Agent...")
     impl_prompt_file = os.path.join(LOGS_DIR, f"prompt_impl_{identifier}.txt")
     with open(impl_prompt_file, "w") as f:
         f.write(result.impl_prompt)
 
-    return _run_claude(identifier, impl_prompt_file, log_file, worktree_path, "Final Phase: Implementation")
+    return _run_claude(identifier, impl_prompt_file, log_file, worktree_path, "Dev Agent")
 
 
 

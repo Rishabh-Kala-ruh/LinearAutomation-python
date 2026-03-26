@@ -1,16 +1,18 @@
 """
 Sentinel Guardian Integration — loads Sentinel testing skills and builds
-sequential per-skill prompts for Claude Code.
+prompts for the Test Agent.
 
-Each Sentinel skill runs as a separate Claude Code invocation (phase).
+Two modes:
+  - build_single_test_prompt(): ALL skills in one prompt (recommended — 1 Claude session)
+  - build_test_phases(): one skill per prompt (legacy — N Claude sessions)
+
 Stack detection determines which skills apply to the repo.
 
 Usage:
     from skills.sentinel_integration import SentinelTestGenerator
 
     gen = SentinelTestGenerator("/path/to/sentinel-guardian/skills")
-    phases = gen.build_test_phases(enriched_context, worktree_path, repo_name)
-    # phases = [("test-setup", "prompt..."), ("unit-tests", "prompt..."), ...]
+    prompt = gen.build_single_test_prompt(enriched_context, worktree_path, repo_name)
 """
 
 from __future__ import annotations
@@ -179,7 +181,99 @@ class SentinelTestGenerator:
             return FRONTEND_SKILLS
         return BACKEND_SKILLS
 
-    # ── Phase Builder ────────────────────────────────────────────────────
+    # ── Single Prompt Builder (recommended) ─────────────────────────────
+
+    def build_single_test_prompt(
+        self,
+        context: EnrichedContext,
+        worktree_path: str,
+        repo_name: str,
+    ) -> str | None:
+        """
+        Build ONE comprehensive test prompt with all relevant Sentinel skills.
+        The Test Agent handles sequencing internally (unit → integration → security, etc.)
+
+        Returns None if no skills could be loaded.
+        """
+        chain = self.get_skill_chain(worktree_path)
+        available = set(self.get_available_skills())
+        stack = self.detect_stack(worktree_path)
+
+        # Load all relevant skills
+        loaded_skills: list[SentinelSkill] = []
+        for skill_name in chain:
+            if skill_name not in available:
+                continue
+            skill = self._load_skill(skill_name)
+            if skill:
+                loaded_skills.append(skill)
+
+        if not loaded_skills:
+            return None
+
+        # Load the Test Agent definition
+        agent_md = self._load_agent_md("test-agent")
+
+        ticket_ctx = self._build_ticket_context(context)
+        sections: list[str] = []
+
+        # ── Agent definition
+        if agent_md:
+            sections.append(agent_md)
+            sections.append("")
+
+        # ── Header
+        sections.append(f"# Test Generation for {context.id} — {context.title}")
+        sections.append(f"**Repo:** `{repo_name}` at `{worktree_path}`")
+        sections.append(f"**Stack:** {stack}")
+        sections.append(f"**Test layers to generate:** {', '.join(s.name for s in loaded_skills)}")
+
+        # ── Ticket context
+        sections.append(f"\n{ticket_ctx}")
+
+        # ── All Sentinel skills (concatenated)
+        sections.append(f"\n---\n# Sentinel Guardian Testing Methodology")
+        sections.append(f"Follow these skills IN ORDER. Generate tests for each applicable layer.\n")
+
+        for skill in loaded_skills:
+            sections.append(f"\n{'='*60}")
+            sections.append(f"## {skill.name}")
+            sections.append(f"{'='*60}\n")
+            sections.append(skill.content)
+
+        # ── Final rules
+        sections.append(f"""
+---
+## CRITICAL RULES
+
+1. **ONLY write tests.** Do NOT implement the fix/feature. Do NOT modify source code.
+2. **Every acceptance criterion** must have at least one corresponding test.
+3. **Edge cases from comments** must be tested.
+4. **Follow the repo's existing test conventions** — same framework, directory structure, fixtures.
+5. **No catch-all test files** — tests go in module-aligned files.
+6. **Verify mock targets exist** before mocking them.
+7. **Commit all test files** with message: `test({context.id}): add tests for {context.title}`
+8. **Run the tests** after committing. They SHOULD fail (no implementation yet).
+9. Do NOT push. Do NOT create a PR. Just commit locally.
+""")
+
+        return "\n".join(sections)
+
+    def _load_agent_md(self, agent_name: str) -> str | None:
+        """Load an agent definition from skills/agents/<name>.md"""
+        agent_file = os.path.join(os.path.dirname(__file__), "agents", f"{agent_name}.md")
+        if not os.path.exists(agent_file):
+            return None
+        with open(agent_file) as f:
+            content = f.read()
+        # Strip YAML frontmatter
+        if content.startswith("---"):
+            end = content.find("---", 3)
+            if end != -1:
+                content = content[end + 3:].strip()
+        return content
+
+    # ── Phase Builder (legacy — multiple Claude sessions) ─────────────
 
     def build_test_phases(
         self,
