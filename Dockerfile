@@ -32,7 +32,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py run_once.py ./
 COPY lib/ ./lib/
 COPY skills/ ./skills/
-COPY openclaw-skill/ ./openclaw-skill/
 COPY entrypoint.sh ./
 
 RUN chmod +x entrypoint.sh
