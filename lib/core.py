@@ -406,23 +406,24 @@ def comment_on_issue(issue_id: str, body: str) -> None:
 
 # ── Single Issue Processor (runs in thread) ──────────────────────────────────
 
-def _process_single_issue(issue: dict[str, Any], team_key: str) -> None:
+def _process_single_issue(issue: dict[str, Any], team_key: str, repo_entries: list[RepoEntry] | None = None) -> None:
     """Process one ticket end-to-end. Thread-safe — uses per-repo locks."""
     identifier = issue["identifier"]
     priority_name = PRIORITY_NAMES.get(issue.get("priority", 0), "None")
 
-    # Extract labels and project from the batch query result
     labels = [l["name"] for l in (issue.get("labels") or {}).get("nodes", [])]
-    project_name = (issue.get("project") or {}).get("name")
 
     log(f"\n[{priority_name}] Processing: {identifier} - {issue['title']}")
     log(f"Labels: {', '.join(labels) or 'none'}")
 
-    repo_entries = detect_repos(issue, labels, team_key, project_name)
-    log(f"Detected repos: {', '.join(r.clone_url or f'{GITHUB_ORG}/{r.name}' for r in repo_entries)}")
+    # Use pre-detected repos from Phase 2 (includes Pathfinder), or fallback
+    if not repo_entries:
+        project_name = (issue.get("project") or {}).get("name")
+        repo_entries = detect_repos(issue, labels, team_key, project_name)
+    log(f"Repos: {', '.join(r.clone_url or f'{GITHUB_ORG}/{r.name}' for r in repo_entries)}")
 
     try:
-        transition_issue(issue, "started")
+        transition_issue(issue, "started", state_name="In Progress")
         pr_urls: list[str] = []
 
         for entry in repo_entries:
@@ -521,7 +522,9 @@ def process_tickets() -> None:
         )
         log(f"Eligible tickets ({len(eligible)}), priority order: {priority_summary}")
 
-        # ── Phase 2: PREPARE — clone/update all unique repos in parallel ──
+        # ── Phase 2: PREPARE — detect repos (with Pathfinder) and clone in parallel ──
+
+        from skills.pathfinder_parser import parse_pathfinder_comment
 
         all_repo_entries: dict[str, RepoEntry] = {}  # repo_name -> entry (deduplicated)
         issue_repos: list[tuple[dict[str, Any], str, list[RepoEntry]]] = []
@@ -529,7 +532,25 @@ def process_tickets() -> None:
         for issue, team_key in eligible:
             labels = [l["name"] for l in (issue.get("labels") or {}).get("nodes", [])]
             project_name = (issue.get("project") or {}).get("name")
-            entries = detect_repos(issue, labels, team_key, project_name)
+
+            # Try Pathfinder comment first for repo detection
+            entries: list[RepoEntry] = []
+            try:
+                comments = linear.get_issue_comments(issue["id"])
+                pf = parse_pathfinder_comment(comments)
+                if pf and pf.repos:
+                    entries = [
+                        RepoEntry(name=r, clone_url=f"git@github.com:{GITHUB_ORG}/{r}.git")
+                        for r in pf.repos
+                    ]
+                    log(f"  [{issue['identifier']}] Pathfinder repos: {pf.repos}")
+            except Exception:
+                pass
+
+            # Fallback to standard detection
+            if not entries:
+                entries = detect_repos(issue, labels, team_key, project_name)
+
             issue_repos.append((issue, team_key, entries))
             for entry in entries:
                 if entry.name.lower() not in all_repo_entries:
@@ -557,8 +578,8 @@ def process_tickets() -> None:
 
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TICKETS) as pool:
             futures = {
-                pool.submit(_process_single_issue, issue, team_key): issue["identifier"]
-                for issue, team_key, _ in issue_repos
+                pool.submit(_process_single_issue, issue, team_key, entries): issue["identifier"]
+                for issue, team_key, entries in issue_repos
             }
             for future in as_completed(futures):
                 identifier = futures[future]
