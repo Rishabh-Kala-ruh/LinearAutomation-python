@@ -408,6 +408,107 @@ def comment_on_issue(issue_id: str, body: str) -> None:
         log(f"Comment failed: {err}")
 
 
+# ── Review Comment Builder ───────────────────────────────────────────────────
+
+def _build_review_comment(
+    identifier: str,
+    issue: dict[str, Any],
+    pr_urls: list[str],
+    repo_entries: list,
+    team_key: str,
+) -> str:
+    """Build a rich review comment for the Linear ticket with summary of changes."""
+    sections: list[str] = []
+
+    sections.append(f"## 🤖 Claude Code — {identifier}")
+    sections.append("")
+
+    # PR links
+    pr_list = "\n".join(f"- {url}" for url in pr_urls)
+    sections.append(f"### Pull Request(s)")
+    sections.append(pr_list)
+    sections.append("")
+
+    # Get commit messages and diff stats from the log file
+    log_file = os.path.join(LOGS_DIR, f"claude_{identifier}.log")
+    commits_summary = ""
+    files_changed = ""
+
+    for entry in repo_entries:
+        repo_path = REPO_MAP.get(entry.name) or os.path.join(REPOS_DIR, entry.name)
+        branch_name = f"claude/{identifier.lower()}"
+        try:
+            # Get commit messages from the branch
+            commits = shell(
+                f'git log origin/{TARGET_BRANCH}..{branch_name} --pretty=format:"- %s" 2>/dev/null || '
+                f'git log origin/main..{branch_name} --pretty=format:"- %s" 2>/dev/null || '
+                f'git log HEAD~5..HEAD --pretty=format:"- %s"',
+                cwd=repo_path,
+            )
+            if commits:
+                commits_summary += f"**{entry.name}:**\n{commits}\n\n"
+
+            # Get diff stats
+            diff_stat = shell(
+                f'git diff origin/{TARGET_BRANCH}..{branch_name} --stat 2>/dev/null || '
+                f'git diff origin/main..{branch_name} --stat 2>/dev/null || '
+                f'git diff HEAD~5..HEAD --stat',
+                cwd=repo_path,
+            )
+            if diff_stat:
+                files_changed += f"**{entry.name}:**\n```\n{diff_stat}\n```\n\n"
+        except Exception:
+            pass
+
+    # Commits section
+    if commits_summary:
+        sections.append("### Commits")
+        sections.append(commits_summary.strip())
+        sections.append("")
+
+    # Files changed section
+    if files_changed:
+        sections.append("### Files Changed")
+        sections.append(files_changed.strip())
+        sections.append("")
+
+    # Pathfinder context (if available)
+    try:
+        from skills.pathfinder_parser import parse_pathfinder_comment
+        from skills.ticket_enricher import LinearEnricher
+        enricher = LinearEnricher(LINEAR_API_KEY)
+        enriched = enricher.enrich(issue)
+        pathfinder = parse_pathfinder_comment(
+            [{"body": c.body} for c in enriched.comments]
+        )
+        if pathfinder:
+            classification = pathfinder.classification
+            complexity = pathfinder.complexity
+            sections.append(f"### Context")
+            sections.append(f"- **Type:** {classification} | **Complexity:** {complexity}")
+            if pathfinder.file_changes:
+                planned_files = ", ".join(
+                    f"`{fc.file}`" for fc in pathfinder.file_changes[:5]
+                )
+                sections.append(f"- **Planned changes:** {planned_files}")
+            sections.append("")
+    except Exception:
+        pass
+
+    # Review checklist
+    sections.append("### Review Checklist")
+    sections.append("- [ ] Code changes match the ticket requirements")
+    sections.append("- [ ] Tests are included and pass")
+    sections.append("- [ ] No unrelated changes")
+    sections.append("- [ ] No security issues introduced")
+    sections.append("- [ ] Ready to merge")
+    sections.append("")
+    sections.append("---")
+    sections.append("*Automated by Linear-Claude Automation*")
+
+    return "\n".join(sections)
+
+
 # ── Single Issue Processor (runs in thread) ──────────────────────────────────
 
 def _process_single_issue(issue: dict[str, Any], team_key: str) -> None:
@@ -453,11 +554,10 @@ def _process_single_issue(issue: dict[str, Any], team_key: str) -> None:
 
         if pr_urls:
             transition_issue(issue, "started", state_name="Code Review")
-            pr_list = "\n".join(f"- {url}" for url in pr_urls)
-            comment_on_issue(
-                issue["id"],
-                f"🤖 **Claude Code** created {len(pr_urls)} PR(s):\n\n{pr_list}\n\nPlease review.",
+            review_comment = _build_review_comment(
+                identifier, issue, pr_urls, repo_entries, team_key,
             )
+            comment_on_issue(issue["id"], review_comment)
             log(f"Done: {identifier} -> {', '.join(pr_urls)}")
             with _processed_lock:
                 processed_issues.add(issue["id"])
