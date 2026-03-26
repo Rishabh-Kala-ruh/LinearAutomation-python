@@ -88,10 +88,10 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
     repos: list[str] = []
     primary_repo: str | None = None
 
+    # Format 1: "**Repos Affected:** agent-platform-v2 (primary), ai-gateway (possible)"
     m = re.search(r"\*\*Repos Affected:\*\*\s*(.+)", body)
     if m:
         repos_line = m.group(1).strip()
-        # Parse "agent-platform-v2 (primary), ai-gateway (possible)"
         for part in repos_line.split(","):
             part = part.strip()
             repo_match = re.match(r"([\w.-]+)", part)
@@ -100,6 +100,25 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
                 repos.append(repo_name)
                 if "primary" in part.lower():
                     primary_repo = repo_name
+
+    # Format 2: "#### Repo 1: `agent-platform-v2` (Primary Changes)"
+    if not repos:
+        for m in re.finditer(r"#{1,4}\s+Repo\s+\d+:\s+`?([\w.-]+)`?", body):
+            repo_name = m.group(1)
+            if repo_name not in repos:
+                repos.append(repo_name)
+
+    # Format 3: "### agent-platform-v2" or "### agent-platform-v2 (Primary)"
+    # (already handled in code changes table section below)
+
+    # Format 4: Extract from "Affected Files Summary" table — "| agent-platform-v2 |"
+    if not repos:
+        for m in re.finditer(r"\|\s*([\w][\w.-]+)\s*\|.*\|.*\|", body):
+            repo_name = m.group(1).strip()
+            # Skip table headers and common non-repo words
+            if repo_name.lower() not in ("repo", "file", "risk", "change", "function", "description", "type"):
+                if repo_name not in repos:
+                    repos.append(repo_name)
 
     if repos and not primary_repo:
         primary_repo = repos[0]
@@ -113,10 +132,15 @@ def parse_pathfinder_comment(comments: list[dict]) -> PathfinderAnalysis | None:
     # Also handles: | file/path.py | function | TYPE | description |
     current_repo = ""
     for line in body.split("\n"):
-        # Detect repo header: "### agent-platform-v2" or "### agent-platform-v2 (Primary)"
-        repo_header = re.match(r"###\s+([\w.-]+)", line)
-        if repo_header:
-            current_repo = repo_header.group(1)
+        # Detect repo header formats:
+        #   "### agent-platform-v2" / "### agent-platform-v2 (Primary)"
+        #   "#### Repo 1: `agent-platform-v2` (Primary Changes)"
+        repo_header = re.match(r"#{2,4}\s+(?:Repo\s+\d+:\s+)?`?([\w.-]+)`?", line)
+        if repo_header and "/" not in repo_header.group(1):
+            candidate = repo_header.group(1)
+            # Skip generic headers like "Requirements", "Risks", etc.
+            if not candidate[0].isupper() or candidate in repos or candidate.count("-") >= 1:
+                current_repo = candidate
             continue
 
         # Parse table rows
