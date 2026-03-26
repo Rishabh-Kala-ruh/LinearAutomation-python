@@ -74,13 +74,14 @@ class LinearClient:
         return data["issues"]["nodes"]
 
     def get_issues_with_labels(self, team_id: str, assignee_id: str, first: int = 20) -> list[dict[str, Any]]:
-        """Batch query: fetches issues with labels and project name inline (fewer API calls)."""
+        """Batch query: fetches issues with labels and project name inline (fewer API calls).
+        Filters for 'Ready for Development' state name, falling back to unstarted/started types."""
         query = """
         query($teamId: ID!, $assigneeId: ID!, $first: Int!) {
           issues(
             filter: {
               team: { id: { eq: $teamId } }
-              state: { type: { in: ["unstarted", "started"] } }
+              state: { name: { eqIgnoreCase: "Ready for Development" } }
               assignee: { id: { eq: $assigneeId } }
             }
             first: $first
@@ -97,12 +98,47 @@ class LinearClient:
               labels { nodes { name } }
               project { name }
               team { id }
+              state { name type }
             }
           }
         }
         """
         data = self._gql(query, {"teamId": team_id, "assigneeId": assignee_id, "first": first})
-        return data["issues"]["nodes"]
+        issues = data["issues"]["nodes"]
+
+        # If no issues found with exact state name, fallback to type-based filter
+        if not issues:
+            fallback_query = """
+            query($teamId: ID!, $assigneeId: ID!, $first: Int!) {
+              issues(
+                filter: {
+                  team: { id: { eq: $teamId } }
+                  state: { type: { in: ["unstarted", "started"] } }
+                  assignee: { id: { eq: $assigneeId } }
+                }
+                first: $first
+              ) {
+                nodes {
+                  id
+                  identifier
+                  title
+                  description
+                  url
+                  priority
+                  createdAt
+                  updatedAt
+                  labels { nodes { name } }
+                  project { name }
+                  team { id }
+                  state { name type }
+                }
+              }
+            }
+            """
+            data = self._gql(fallback_query, {"teamId": team_id, "assigneeId": assignee_id, "first": first})
+            issues = data["issues"]["nodes"]
+
+        return issues
 
     # ── labels ───────────────────────────────────────────────────────
 

@@ -34,6 +34,7 @@ from skills.ticket_enricher import (
     PRIORITY_MAP,
 )
 from skills.sentinel_integration import SentinelTestGenerator
+from skills.pathfinder_parser import parse_pathfinder_comment, PathfinderAnalysis
 
 
 # ── Types ────────────────────────────────────────────────────────────────────
@@ -63,6 +64,7 @@ class DeveloperResult:
     impl_prompt: str                     # Final phase: implementation
     enriched_context: EnrichedContext
     stack_type: str = "backend"          # "backend" | "frontend" | "fullstack"
+    pathfinder: PathfinderAnalysis | None = None  # Parsed Pathfinder analysis (if found)
 
 
 @dataclass
@@ -145,15 +147,27 @@ class DeveloperSkill:
         # Step 1: Enrich the ticket with deep context
         enriched = self.enricher.enrich(issue)
 
-        # Step 2: Resolve scope — what kind of ticket is this?
+        # Step 2: Parse Pathfinder analysis from comments (RCA/TRD)
+        pathfinder = parse_pathfinder_comment(
+            [{"body": c.body} for c in enriched.comments]
+        )
+        if pathfinder:
+            # Merge Pathfinder file hints into enriched context
+            for hint in pathfinder.file_hints:
+                if hint not in enriched.file_hints:
+                    enriched.file_hints.append(hint)
+
+        # Step 3: Resolve scope — what kind of ticket is this?
         scope_type, parent_info, sub_tasks = self._resolve_scope(issue)
 
-        # Step 3: Resolve repos (with parent inheritance for sub-tasks)
+        # Step 4: Resolve repos — Pathfinder takes priority, then labels/description
         labels = [l["name"] for l in (issue.get("labels") or {}).get("nodes", [])]
         project_name = (issue.get("project") or {}).get("name")
-        repos = self._resolve_repos(issue, labels, team_key, project_name, parent_info)
+        repos = self._resolve_repos(
+            issue, labels, team_key, project_name, parent_info, pathfinder
+        )
 
-        # Step 4: Detect stack and build sequential Sentinel test phases
+        # Step 5: Detect stack and build sequential Sentinel test phases
         stack_type = self.sentinel.detect_stack(worktree_path)
         test_phases = self.sentinel.build_test_phases(enriched, worktree_path, repo_name)
 
@@ -163,10 +177,10 @@ class DeveloperSkill:
                 "Check that SKILL.md files exist in the Sentinel skills directory."
             )
 
-        # Step 5: Build final implementation prompt (with TDD rules)
+        # Step 6: Build final implementation prompt (with Pathfinder context)
         impl_prompt = self._build_prompt(
             enriched, scope_type, parent_info, sub_tasks,
-            worktree_path, repo_name,
+            worktree_path, repo_name, pathfinder,
         )
 
         return DeveloperResult(
@@ -178,6 +192,7 @@ class DeveloperSkill:
             impl_prompt=impl_prompt,
             enriched_context=enriched,
             stack_type=stack_type,
+            pathfinder=pathfinder,
         )
 
     # ── Scope Resolution ─────────────────────────────────────────────────
@@ -240,12 +255,24 @@ class DeveloperSkill:
         team_key: str,
         project_name: str | None,
         parent_info: dict[str, Any] | None,
+        pathfinder: PathfinderAnalysis | None = None,
     ) -> list[RepoEntry]:
         """
-        Resolve target repos. If this is a sub-task without repo info,
-        inherit from the parent ticket.
+        Resolve target repos. Priority:
+          1. Pathfinder 'Repos Affected' (most reliable — from analysis comment)
+          2. repo: labels on ticket
+          3. GitHub URLs in description
+          4. Parent ticket (for sub-tasks)
+          5. Project name / team key fallback
         """
-        # Try resolving from the issue itself first
+        # Priority 1: Pathfinder analysis has explicit repo list
+        if pathfinder and pathfinder.repos:
+            return [
+                RepoEntry(name=r, clone_url=f"git@github.com:{self.github_org}/{r}.git")
+                for r in pathfinder.repos
+            ]
+
+        # Priority 2-5: Standard detection
         repos = self._detect_repos(issue, labels, team_key, project_name)
 
         # If we only got a fallback (team key) and this is a sub-task, try the parent
@@ -308,6 +335,7 @@ class DeveloperSkill:
         sub_tasks: list[SubTaskScope],
         worktree_path: str,
         repo_name: str,
+        pathfinder: PathfinderAnalysis | None = None,
     ) -> str:
         """Build a scope-aware prompt for Claude Code."""
         sections: list[str] = []
@@ -339,6 +367,20 @@ class DeveloperSkill:
             sections.append(f"**Labels:** {', '.join(context.labels)}")
 
         sections.append(f"\n### Description\n{context.description}")
+
+        # ── Pathfinder Analysis (RCA/TRD — primary context) ──────────
+        if pathfinder:
+            label = "RCA (Root Cause Analysis)" if pathfinder.classification == "BUG" else "TRD (Technical Requirements Document)"
+            sections.append(f"\n## Pathfinder {label}")
+            sections.append(f"**Classification:** {pathfinder.classification} | **Complexity:** {pathfinder.complexity}")
+            sections.append(f"\n> **This is your primary source of truth.** The Pathfinder analysis below contains the exact root cause, fix approach, and code changes table. Follow it precisely.")
+            sections.append(f"\n{pathfinder.full_comment}")
+
+            if pathfinder.file_changes:
+                sections.append(f"\n### Code Changes Summary (from Pathfinder)")
+                sections.append(f"> These are the exact files and functions you need to modify:")
+                for fc in pathfinder.file_changes:
+                    sections.append(f"- **{fc.change_type}** `{fc.file}` → `{fc.function}` — {fc.description}")
 
         # ── Parent Context (for sub-tasks) ───────────────────────────
         if scope_type == "subtask" and parent_info:
