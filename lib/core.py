@@ -235,17 +235,15 @@ def _run_claude(identifier: str, prompt_file: str, log_file: str, worktree_path:
     """Execute a single Claude Code invocation. Pipes prompt via stdin to avoid shell arg length limits."""
     log(f"Running Claude Code ({CLAUDE_CMD}) — {phase} for {identifier}...")
     try:
-        with open(prompt_file) as f:
-            prompt_content = f.read()
-
+        # Pipe prompt via shell to avoid OS arg length limit on large prompts
         env = {**os.environ, "PATH": f"{EXTRA_PATHS}:{os.environ.get('PATH', '')}"}
+        cmd = (
+            f"cat '{prompt_file}' | {CLAUDE_CMD} -p - "
+            f"--allowedTools Bash Read Edit Write Glob Grep "
+            f"--max-turns 30 --output-format text"
+        )
         result = subprocess.run(
-            [
-                CLAUDE_CMD, "-p", prompt_content,
-                "--allowedTools", "Bash", "Read", "Edit", "Write", "Glob", "Grep",
-                "--max-turns", "30",
-                "--output-format", "text",
-            ],
+            cmd, shell=True,
             capture_output=True, text=True,
             cwd=worktree_path, timeout=900, env=env,
         )
