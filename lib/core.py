@@ -313,6 +313,19 @@ def run_claude_code(
     log(f"[{identifier}] Test Agent complete — tests committed.")
 
     # ── Agent 2: Dev Agent ────────────────────────────────────────────
+    # Verify worktree still exists (Test Agent's Claude may have removed it)
+    if not os.path.exists(worktree_path):
+        log(f"[{identifier}] Worktree gone after Test Agent — recreating...")
+        try:
+            repo_path = os.path.dirname(os.path.dirname(worktree_path))  # .worktrees/claude/id -> repo
+            branch_name = os.path.basename(worktree_path)
+            # The branch should still exist with test commits — just re-add the worktree
+            shell(f'git worktree add "{worktree_path}" "{branch_name}"', cwd=repo_path)
+            log(f"[{identifier}] Worktree recreated at {worktree_path}")
+        except Exception as err:
+            log(f"[{identifier}] Failed to recreate worktree: {err}")
+            return False
+
     log(f"[{identifier}] Starting Dev Agent...")
     impl_prompt_file = os.path.join(LOGS_DIR, f"prompt_impl_{identifier}.txt")
     with open(impl_prompt_file, "w") as f:
@@ -366,23 +379,16 @@ def push_and_create_pr(
         f.write(pr_body)
 
     try:
-        return shell(
+        pr_url = shell(
             f'gh pr create --repo "{gh_repo}" --base "{TARGET_BRANCH}" '
             f'--head "{branch_name}" --title "fix({identifier}): {title}" '
             f'--body-file "{pr_body_file}"',
             cwd=worktree_path,
         )
-    except Exception:
-        try:
-            return shell(
-                f'gh pr create --repo "{gh_repo}" --base main '
-                f'--head "{branch_name}" --title "fix({identifier}): {title}" '
-                f'--body-file "{pr_body_file}"',
-                cwd=worktree_path,
-            )
-        except Exception as err:
-            log(f"PR creation failed: {err}")
-            return None
+        return pr_url
+    except Exception as err:
+        log(f"PR creation failed for {identifier} on {gh_repo}: {err}")
+        return None
 
 
 # ── Linear Updates ───────────────────────────────────────────────────────────
